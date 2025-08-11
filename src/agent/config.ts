@@ -2,7 +2,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 
-const CONFIG_DIR = path.join(os.homedir(), '.local-agent')
+const overrideDir = process.env.LOCAL_AGENT_CONFIG_DIR
+const CONFIG_DIR = overrideDir ? path.resolve(overrideDir) : path.join(os.homedir(), '.local-agent')
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json')
 
 export type AppConfig = {

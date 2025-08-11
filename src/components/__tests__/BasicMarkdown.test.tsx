@@ -1,15 +1,7 @@
-import { render, screen } from '@testing-library/react'
 import React from 'react'
+import { render } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
-import { } from '../chat-message'
-// Re-export BasicMarkdown for tests (temporary) by importing compiled file path
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore
-import ChatMessageModule from '../chat-message'
-
-const BasicMarkdown = (ChatMessageModule as any).__esModule
-  ? (ChatMessageModule as any).default?.BasicMarkdown || (ChatMessageModule as any).BasicMarkdown
-  : (ChatMessageModule as any).BasicMarkdown
+import { BasicMarkdown } from '@/components/chat-message'
 
 describe('BasicMarkdown', () => {
   it('renders headings and lists', () => {

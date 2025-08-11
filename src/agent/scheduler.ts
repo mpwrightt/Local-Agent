@@ -123,6 +123,8 @@ async function executeTask(task: PlannedTask, ctx: OrchestratorInput, signal: Ab
             targets: limitedTargets,
             aggregatePath,
             synthesis: undefined,
+            snippets: [],
+            selected: [],
           }
           const out = await graph.invoke(stateIn)
           const summary = out.synthesis ?? 'No synthesis produced.'

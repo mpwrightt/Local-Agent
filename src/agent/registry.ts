@@ -11,19 +11,24 @@ export type WorkerContext = {
 }
 
 export type WorkerRunner = (ctx: WorkerContext) => Promise<any>
+export type WorkerLifecycle = {
+  init?: () => Promise<void> | void
+  dispose?: () => Promise<void> | void
+}
 
 type Registered = {
   id: string
   role: string
   runner: WorkerRunner
   source: 'builtin' | 'plugin'
+  lifecycle?: WorkerLifecycle
 }
 
 const registry = new Map<string, Registered>()
 const pluginIds = new Set<string>()
 
-export function registerWorker(role: string, id: string, runner: WorkerRunner, source: 'builtin' | 'plugin' = 'builtin') {
-  registry.set(role, { id, role, runner, source })
+export function registerWorker(role: string, id: string, runner: WorkerRunner, source: 'builtin' | 'plugin' = 'builtin', lifecycle?: WorkerLifecycle) {
+  registry.set(role, { id, role, runner, source, lifecycle })
 }
 
 export function getWorker(role: string): Registered | undefined {
@@ -64,9 +69,10 @@ export async function loadPlugins(pluginsDir?: string) {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const mod = await import(pathToFileUrlSafe(modPath))
       const runner: WorkerRunner = typeof mod.default === 'function' ? mod.default : mod.runner
+      const lifecycle: WorkerLifecycle | undefined = mod.lifecycle
       if (typeof runner !== 'function') throw new Error(`Invalid plugin runner in ${manifest.id}`)
       for (const cap of manifest.capabilities) {
-        registerWorker(cap.role, manifest.id, runner, 'plugin')
+        registerWorker(cap.role, manifest.id, runner, 'plugin', lifecycle)
       }
       pluginIds.add(manifest.id)
       loaded++

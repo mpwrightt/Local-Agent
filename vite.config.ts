@@ -14,5 +14,23 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     hmr: { overlay: false },
+    proxy: {
+      // Proxy LM Studio to avoid CORS in browser dev
+      '/lm': {
+        target: 'http://127.0.0.1:1234',
+        changeOrigin: true,
+        rewrite: (p: string) => p.replace(/^\/lm/, ''),
+      },
+    },
+  },
+  preview: {
+    port: 5173,
+    proxy: {
+      '/lm': {
+        target: 'http://127.0.0.1:1234',
+        changeOrigin: true,
+        rewrite: (p: string) => p.replace(/^\/lm/, ''),
+      },
+    },
   },
 })

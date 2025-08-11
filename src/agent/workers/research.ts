@@ -111,6 +111,34 @@ export async function spawnResearchAgent(ctx: Ctx) {
     try { return new URL(href).hostname.replace(/^www\./i, '').toLowerCase() } catch { return '' }
   }
   const normalizeTitle = (s: string): string => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  const extractSnippets = (fullText: string, query: string, maxSnippets: number = 3): string[] => {
+    try {
+      const text = (fullText || '').replace(/\r\n/g, '\n')
+      const paras = text.split(/\n\s*\n+/)
+      const q = (query || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim()
+      const qWords = Array.from(new Set(q.split(/\s+/).filter(w => w.length > 2)))
+      const scored: { i: number; score: number; p: string }[] = []
+      for (let i = 0; i < paras.length; i++) {
+        const p = paras[i]
+        const lower = p.toLowerCase()
+        let score = 0
+        for (const w of qWords) if (lower.includes(w)) score += 1
+        if (score > 0) scored.push({ i, score, p })
+      }
+      scored.sort((a, b) => b.score - a.score)
+      const chosen = scored.slice(0, maxSnippets)
+      const windowed: string[] = []
+      for (const c of chosen) {
+        const before = paras[c.i - 1] ? paras[c.i - 1] + '\n' : ''
+        const after = paras[c.i + 1] ? '\n' + paras[c.i + 1] : ''
+        const snippet = (before + c.p + after).trim()
+        windowed.push(snippet.length > 1200 ? snippet.slice(0, 1200) + '…' : snippet)
+      }
+      return windowed
+    } catch {
+      return []
+    }
+  }
   const domainWeight: Record<string, number> = {
     'reuters.com': 3.0,
     'apnews.com': 3.0,
@@ -399,7 +427,7 @@ export async function spawnResearchAgent(ctx: Ctx) {
     const shotPath = path.join(baseDir, `screenshot-${Date.now()}.png`)
     try { await page.screenshot({ path: shotPath, fullPage: true }) } catch {}
 
-    const articles: { title: string; url: string; path: string }[] = []
+    const articles: { title: string; url: string; path: string; snippet?: string }[] = []
     const aggregateParts: string[] = []
 
     // Rank and trim targets for higher quality sources
@@ -419,11 +447,14 @@ export async function spawnResearchAgent(ctx: Ctx) {
       // @ts-expect-error local var may not be defined when tavilyKey is missing
       for (const item of tavilyDeferredLocal) {
         try {
-          const f = path.join(baseDir, `article-${slug(item.title)}-${Date.now()}.txt`)
           const cleanedRaw = cleanExtractedText(item.raw)
-          fs.writeFileSync(f, cleanedRaw, 'utf8')
-          articles.push({ title: item.title, url: item.url, path: f })
-          aggregateParts.push(`# ${item.title}\n${item.url}\n\n${cleanedRaw}\n\n---\n\n`)
+          const snippets = extractSnippets(cleanedRaw, searchQuery)
+          const best = snippets.length > 0 ? snippets.join('\n\n') : cleanedRaw.slice(0, 1200)
+          const md = `# ${item.title}\n${item.url}\n\n> ${best.replace(/\n/g, '\n> ')}\n`
+          const f = path.join(baseDir, `snippet-${slug(item.title)}-${Date.now()}.md`)
+          fs.writeFileSync(f, md, 'utf8')
+          articles.push({ title: item.title, url: item.url, path: f, snippet: best })
+          aggregateParts.push(md + '\n---\n\n')
         } catch {}
       }
       db.addRunEvent(ctx.runId, { type: 'extract_result', taskId: ctx.task.id, count: articles.length })
@@ -447,10 +478,13 @@ export async function spawnResearchAgent(ctx: Ctx) {
           const title = r?.title || finalTargets.find(t => t.url === url)?.title || url
           const text = cleanExtractedText((r?.content || r?.text || r?.markdown || '').toString())
           if (url && text.trim().length > 200) {
-            const f = path.join(baseDir, `article-${slug(title)}-${Date.now()}.txt`)
-            fs.writeFileSync(f, text.slice(0, 16000), 'utf8')
-            articles.push({ title, url, path: f })
-            aggregateParts.push(`# ${title}\n${url}\n\n${text.slice(0, 16000)}\n\n---\n\n`)
+            const snippets = extractSnippets(text, searchQuery)
+            const best = snippets.length > 0 ? snippets.join('\n\n') : text.slice(0, 1200)
+            const md = `# ${title}\n${url}\n\n> ${best.replace(/\n/g, '\n> ')}\n`
+            const f = path.join(baseDir, `snippet-${slug(title)}-${Date.now()}.md`)
+            fs.writeFileSync(f, md, 'utf8')
+            articles.push({ title, url, path: f, snippet: best })
+            aggregateParts.push(md + '\n---\n\n')
           }
         }
         crawled = articles.length > 0
@@ -476,10 +510,13 @@ export async function spawnResearchAgent(ctx: Ctx) {
             const title: string = finalTargets.find(t => t.url === url)?.title || url
             const text: string = cleanExtractedText((r?.raw_content || r?.content || '').toString())
             if (url && text.trim().length > 200) {
-              const f = path.join(baseDir, `article-${slug(title)}-${Date.now()}.txt`)
-              fs.writeFileSync(f, text.slice(0, 16000), 'utf8')
-              articles.push({ title, url, path: f })
-              aggregateParts.push(`# ${title}\n${url}\n\n${text.slice(0, 16000)}\n\n---\n\n`)
+            const snippets = extractSnippets(text, searchQuery)
+            const best = snippets.length > 0 ? snippets.join('\n\n') : text.slice(0, 1200)
+            const md = `# ${title}\n${url}\n\n> ${best.replace(/\n/g, '\n> ')}\n`
+            const f = path.join(baseDir, `snippet-${slug(title)}-${Date.now()}.md`)
+            fs.writeFileSync(f, md, 'utf8')
+            articles.push({ title, url, path: f, snippet: best })
+            aggregateParts.push(md + '\n---\n\n')
             }
           }
           db.addRunEvent(ctx.runId, { type: 'extract_result', taskId: ctx.task.id, count: results.length })
@@ -512,12 +549,13 @@ export async function spawnResearchAgent(ctx: Ctx) {
             return inner
           })
           const cleaned = cleanExtractedText(text)
-          if (cleaned.trim().length > 200) {
-            const f = path.join(baseDir, `article-${slug(t.title)}-${Date.now()}.txt`)
-            fs.writeFileSync(f, cleaned, 'utf8')
-            articles.push({ title: t.title, url: t.url, path: f })
-            aggregateParts.push(`# ${t.title}\n${t.url}\n\n${cleaned}\n\n---\n\n`)
-          }
+          const snippets = extractSnippets(cleaned, searchQuery)
+          const best = snippets.length > 0 ? snippets.join('\n\n') : cleaned.slice(0, 1200)
+          const md = `# ${t.title}\n${t.url}\n\n> ${best.replace(/\n/g, '\n> ')}\n`
+          const f = path.join(baseDir, `snippet-${slug(t.title)}-${Date.now()}.md`)
+          fs.writeFileSync(f, md, 'utf8')
+          articles.push({ title: t.title, url: t.url, path: f, snippet: best })
+          aggregateParts.push(md + '\n---\n\n')
         } catch (err) {
           logger.warn({ err }, 'Failed to scrape target')
         }

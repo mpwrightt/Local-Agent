@@ -8,10 +8,12 @@ import { useState } from "react"
 export type ChatMessage = {
   id: string
   role: "ai" | "user"
-  type?: "text" | "summary" | "code" | "task" | "image" | "file_operation"
+  type?: "text" | "summary" | "code" | "task" | "image" | "file_operation" | "links" | "thinking" | "markdown" | "sources"
   content: string
   summary?: { title: string; bullets: string[] }
-  code?: { language: string; code: string }
+  code?: { language: string; code: string; collapsed?: boolean }
+  markdown?: { text: string; title?: string; collapsible?: boolean }
+  sources?: Array<{ title: string; url: string; snippet: string; path?: string }>
   task?: { title: string; steps: { label: string; done: boolean }[] }
   image?: { src: string; alt: string }
   file_operation?: { 
@@ -23,9 +25,11 @@ export type ChatMessage = {
     ocrResults?: Array<{ path: string; extractedText: string; confidence: number; matchScore: number }>
   }
   suggestions?: string[]
+  links?: Array<{ title: string; url: string; snippet?: string }>
+  sourcesQuery?: string
 }
 
-function BasicMarkdown({ text }: { text: string }) {
+export function BasicMarkdown({ text }: { text: string }) {
   // Lightweight renderer: headers, bold, italics, lists, fenced code, and simple tables
   // Convert triple backticks blocks
   const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g
@@ -52,24 +56,39 @@ function BasicMarkdown({ text }: { text: string }) {
     // lists
     s = s.replace(/^-\s+(.*)$/gm, '<li>$1</li>')
     s = s.replace(/(<li>.*<\/li>\n?)+/g, (block) => `<ul>${block}</ul>`) 
-    // tables (pipe format)
-    s = s.replace(/^(?:\|.*\|\n)+/gm, (block) => {
-      const rows = block
-        .trim()
-        .split('\n')
-        .filter((r) => !/^\|?\s*-+\s*(\|\s*-+\s*)+\|?$/.test(r)) // drop separator row
-        .map((r) => r.trim().replace(/^\||\|$/g, ''))
-      if (rows.length === 0) return block
-      const cells = rows.map((r) => r.split('|').map((c) => c.trim()))
-      const head = cells.shift()!
-      const thead = `<thead><tr>${head.map((c) => `<th>${c}</th>`).join('')}</tr></thead>`
-      const tbody = `<tbody>${cells.map((row) => `<tr>${row.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>`
-      return `<table class="min-w-full border-separate border-spacing-y-1">${thead}${tbody}</table>`
-    })
+    // tables (pipe format with separator line below header)
+    s = convertTables(s)
     // paragraphs
     s = s.replace(/\n{2,}/g, '</p><p>')
     s = `<p>${s}</p>`
     return s
+  }
+
+  function convertTables(src: string): string {
+    const lines = src.split('\n')
+    const out: string[] = []
+    for (let i = 0; i < lines.length; i++) {
+      const header = lines[i]
+      const sep = lines[i + 1]
+      if (header && header.includes('|') && sep && /^[-|:\s]+$/.test(sep)) {
+        const rows: string[] = []
+        rows.push(header)
+        i += 1
+        while (i + 1 < lines.length && lines[i + 1].includes('|')) {
+          rows.push(lines[i + 1])
+          i += 1
+        }
+        const normalized = rows.map((r) => r.trim().replace(/^\||\|$/g, ''))
+        const headCells = normalized[0].split('|').map((c) => c.trim())
+        const bodyRows = normalized.slice(1)
+        const thead = `<thead><tr>${headCells.map((c) => `<th>${c}</th>`).join('')}</tr></thead>`
+        const tbody = `<tbody>${bodyRows.map((r) => `<tr>${r.split('|').map((c) => `<td>${c.trim()}</td>`).join('')}</tr>`).join('')}</tbody>`
+        out.push(`<table class="min-w-full border-separate border-spacing-y-1">${thead}${tbody}</table>`)
+        continue
+      }
+      out.push(header)
+    }
+    return out.join('\n')
   }
 
   return (
@@ -144,6 +163,11 @@ export function ChatMessageBubble({
             ))}
           </div>
         )}
+
+        {/* Sources toggle */}
+        {isAI && message.links && message.links.length > 0 && (
+          <SourcesToggle links={message.links} />
+        )}
       </div>
 
       {!isAI && (
@@ -157,10 +181,16 @@ export function ChatMessageBubble({
 
 function MessageContent({ message, onFileAction }: { message: ChatMessage; onFileAction?: (action: string, path: string) => void }) {
   switch (message.type) {
+    case "thinking":
+      return <ThinkingBox text={message.content} />
     case "summary":
       return <SummaryCard title={message.summary?.title ?? "Summary"} bullets={message.summary?.bullets ?? []} />
+    case "markdown":
+      return <CollapsibleMarkdown title={message.markdown?.title ?? 'Full report'} text={message.markdown?.text ?? message.content} collapsible={message.markdown?.collapsible ?? true} />
+    case "sources":
+      return <SourcesReport items={message.sources ?? []} query={message.sourcesQuery} onFileAction={onFileAction} />
     case "code":
-      return <CodeBlock language={message.code?.language ?? "text"} code={message.code?.code ?? message.content} />
+      return <CodeBlock language={message.code?.language ?? "text"} code={message.code?.code ?? message.content} collapsed={message.code?.collapsed ?? true} />
     case "task":
       return <TaskCard title={message.task?.title ?? "Task"} steps={message.task?.steps ?? []} />
     case "image":
@@ -173,6 +203,8 @@ function MessageContent({ message, onFileAction }: { message: ChatMessage; onFil
       )
     case "file_operation":
       return <FileOperationCard fileOp={message.file_operation!} onFileAction={onFileAction} />
+    case "links":
+      return <LinksCard items={message.links ?? []} />
     default:
       return <BasicMarkdown text={message.content} />
   }
@@ -208,13 +240,167 @@ function SummaryCard({ title, bullets }: { title: string; bullets: string[] }) {
   )
 }
 
-function CodeBlock({ language, code }: { language: string; code: string }) {
+function LinksCard({ items }: { items: Array<{ title: string; url: string; snippet?: string }> }) {
+  if (!items || items.length === 0) return <div className="text-sm text-white/60">No links.</div>
+  return (
+    <div className="w-full max-w-full overflow-hidden rounded-xl border border-white/10 bg-white/5 p-3">
+      <h4 className="text-sm font-semibold text-white/90 mb-2">Top results</h4>
+      <div className="grid gap-2">
+        {items.slice(0, 3).map((it, idx) => (
+          <a
+            key={idx}
+            href={it.url}
+            target="_blank"
+            rel="noreferrer"
+            className="block w-full overflow-hidden group rounded-lg bg-white/5 border border-white/10 p-2 hover:bg-white/10 transition"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0 max-w-full">
+                <div className="text-sm text-white/90 break-words">{it.title || it.url}</div>
+                <div className="text-[11px] text-white/50 break-all">{it.url}</div>
+              </div>
+              <ExternalLink className="h-3.5 w-3.5 text-white/60 group-hover:text-white/80 flex-shrink-0" />
+            </div>
+            {it.snippet && (
+              <div className="mt-1 text-xs text-white/70 break-words">{it.snippet}</div>
+            )}
+          </a>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SourcesToggle({ links }: { links: Array<{ title: string; url: string; snippet?: string }> }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mt-3 w-full max-w-full">
+      <button
+        onClick={() => setOpen(!open)}
+        className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80 transition hover:scale-[1.02] hover:bg-white/10"
+      >
+        {open ? 'Hide sources' : 'Show sources'}
+      </button>
+      {open && (
+        <div className="mt-2 w-full max-w-full overflow-hidden">
+          <LinksCard items={links} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ThinkingBox({ text }: { text: string }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+      <div className="text-xs font-semibold text-white/80 mb-1">Reasoning</div>
+      <div className="max-h-48 overflow-y-auto whitespace-pre-wrap text-xs text-white/80 leading-relaxed font-mono">
+        {text || '…'}
+      </div>
+    </div>
+  )
+}
+
+function CollapsibleMarkdown({ title, text, collapsible }: { title: string; text: string; collapsible?: boolean }) {
+  const [open, setOpen] = useState(!collapsible)
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
+        <h4 className="text-sm font-semibold text-white/90">{title}</h4>
+        {collapsible && (
+          <button onClick={() => setOpen(!open)} className="text-xs rounded-md border border-white/10 px-2 py-1 bg-white/5 text-white/80 hover:bg-white/10">
+            {open ? 'Hide' : 'Show'}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="p-3">
+          <BasicMarkdown text={text} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SourcesReport({ items, query, onFileAction }: { items: Array<{ title: string; url: string; snippet: string; path?: string }>; query?: string; onFileAction?: (action: string, path: string) => void }) {
+  const [open, setOpen] = useState<Record<number, boolean>>({})
+  const renderHighlight = (text: string) => {
+    if (!query) return <>{text}</>
+    const q = query.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim()
+    const words = Array.from(new Set(q.split(/\s+/).filter(w => w.length > 2)))
+    if (words.length === 0) return <>{text}</>
+    const re = new RegExp(`(${words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi')
+    const parts = text.split(re)
+    return (
+      <>
+        {parts.map((p, i) => re.test(p) ? (
+          <mark key={i} className="bg-purple-500/20 text-white font-semibold">{p}</mark>
+        ) : (
+          <span key={i}>{p}</span>
+        ))}
+      </>
+    )
+  }
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5">
+      <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between">
+        <h4 className="text-sm font-semibold text-white/90">Sources</h4>
+        <span className="text-xs text-white/60">{items.length}</span>
+      </div>
+      <div className="divide-y divide-white/10">
+        {items.map((it, idx) => (
+          <div key={idx} className="p-3">
+            <div className="flex items-center justify-between gap-2">
+              <a href={it.url} target="_blank" rel="noreferrer" className="text-sm text-white/90 hover:underline truncate">
+                {it.title || it.url}
+              </a>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                {it.path && (
+                  <>
+                    <Button size="sm" variant="secondary" className="h-7 px-2 text-xs bg-white/10 text-white/80 hover:bg-white/20" onClick={() => onFileAction?.('open', it.path!)}>Open</Button>
+                    <Button size="sm" variant="secondary" className="h-7 px-2 text-xs bg-white/10 text-white/80 hover:bg-white/20" onClick={() => onFileAction?.('reveal', it.path!)}>Show</Button>
+                  </>
+                )}
+                <Button size="sm" variant="secondary" className="h-7 px-2 text-xs bg-white/10 text-white/80 hover:bg-white/20" onClick={async () => { await navigator.clipboard.writeText(it.snippet); }}>
+                  Quote
+                </Button>
+                <Button size="sm" variant="secondary" className="h-7 px-2 text-xs bg-white/10 text-white/80 hover:bg-white/20" onClick={async () => { await navigator.clipboard.writeText(`- [${it.title || it.url}](${it.url})`); }}>
+                  Cite
+                </Button>
+                <Button size="sm" variant="secondary" className="h-7 px-2 text-xs bg-white/10 text-white/80 hover:bg-white/20" onClick={() => setOpen(o => ({ ...o, [idx]: !o[idx] }))}>
+                  {open[idx] ? 'Hide' : 'Show'}
+                </Button>
+              </div>
+            </div>
+            {open[idx] && (
+              <div className="mt-2 text-sm text-white/80 whitespace-pre-wrap border border-white/10 rounded-md p-2 bg-black/20">
+                {renderHighlight(it.snippet)}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function CodeBlock({ language, code, collapsed = false }: { language: string; code: string; collapsed?: boolean }) {
   const [copied, setCopied] = useState(false)
+  const [open, setOpen] = useState(!collapsed)
   return (
     <div className="rounded-xl border border-white/10 bg-black/40">
       <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
         <span className="text-xs uppercase tracking-wider text-white/50">{language}</span>
-        <Button
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            className="h-7 gap-1 rounded-md bg-white/10 text-white/80 hover:bg-white/20"
+            onClick={() => setOpen((v) => !v)}
+          >
+            <span className="text-xs">{open ? 'Hide' : 'Show'}</span>
+          </Button>
+          <Button
           size="sm"
           variant="secondary"
           className="h-7 gap-1 rounded-md bg-white/10 text-white/80 hover:bg-white/20"
@@ -223,14 +409,17 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
             setCopied(true)
             setTimeout(() => setCopied(false), 1200)
           }}
-        >
+          >
           {copied ? <ClipboardCheck className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
           <span className="text-xs">{copied ? "Copied" : "Copy"}</span>
-        </Button>
+          </Button>
+        </div>
       </div>
-      <pre className="overflow-x-auto p-3 text-xs leading-relaxed text-white/90">
-        <code>{code}</code>
-      </pre>
+      {open && (
+        <pre className="overflow-x-auto p-3 text-xs leading-relaxed text-white/90">
+          <code>{code}</code>
+        </pre>
+      )}
     </div>
   )
 }
