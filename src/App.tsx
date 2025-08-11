@@ -37,6 +37,9 @@ export default function App() {
   const [searchEnabled, setSearchEnabled] = useState<boolean>(true)
   const [showThinking, setShowThinking] = useState<boolean>(true)
   const [activeTab, setActiveTab] = useState<'chat' | 'logs'>('chat')
+  const [remoteMode, setRemoteMode] = useState<boolean>(false)
+  const [remoteBase, setRemoteBase] = useState<string>('')
+  const [remoteToken, setRemoteToken] = useState<string>('')
   const [logs, setLogs] = useState<Array<ReturnType<typeof eventToLogEntry>>>([])
   const [currentRunId, setCurrentRunId] = useState<string | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([
@@ -52,7 +55,7 @@ export default function App() {
   const renderedResearchUIRef = useRef<Set<string>>(new Set()) // keys: runId
   const renderedResearchJSONRef = useRef<Set<string>>(new Set()) // keys: runId
 
-  const agentAny = (typeof window !== 'undefined'
+  const agentAny = (!remoteMode && typeof window !== 'undefined'
     ? (window as unknown as { agent?: {
     startTask?: (input: { prompt: string; model?: string; deep?: boolean; dryRun?: boolean; automation?: boolean }) => Promise<{ runId: string }>
         simpleChat?: (input: { messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>; model?: string; temperature?: number; reasoningLevel?: 'low' | 'medium' | 'high'; searchEnabled?: boolean }) => Promise<{ success: boolean; content: string; error?: string; model?: string; links?: Array<{ title: string; url: string; snippet?: string }> }>
@@ -277,7 +280,7 @@ export default function App() {
     }
     
     // Browser-only fallback for simple Chat mode
-    if (!hasAgent) {
+    if (!hasAgent && !remoteMode) {
       if ((options?.mode ?? agentMode) === 'chat') {
         try {
           setStatus('Thinking')
@@ -308,7 +311,61 @@ export default function App() {
         }
         return
       }
-      alert('Agent bridge not available in browser for this mode. Please run the Electron app for Tasks/Research.')
+      alert('Agent bridge not available in browser for this mode. Please run the Electron app or enable Remote mode for Tasks/Research.')
+      return
+    }
+
+    if (remoteMode) {
+      try {
+        setStatus('Thinking')
+        if ((options?.mode ?? agentMode) === 'chat') {
+          const history = activeConversation.messages
+            .filter(m => m.role === 'user' || m.role === 'ai')
+            .slice(-10)
+            .map(m => ({ role: m.role === 'ai' ? 'assistant' as const : 'user' as const, content: m.content || '' }))
+          history.push({ role: 'user' as const, content: text })
+          const resp = await fetch('/lm/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: modelName, messages: history })
+          })
+          let content = 'Error contacting LM Studio'
+          if (resp.ok) { const data: any = await resp.json(); content = data?.choices?.[0]?.message?.content || content }
+          const links = searchEnabled ? await quickSearch(text, 3) : []
+          appendMessage({ id: `ai:${Date.now()}`, role: 'ai', type: 'text', content, ...(showLinkCards && links.length ? { links } as any : {}) })
+          setStatus('Idle')
+          return
+        }
+        // Tasks/Research via remote agent API
+        const base = remoteBase.replace(/\/$/, '') || ''
+        const res = await fetch(base + '/api/startTask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${remoteToken}` },
+          body: JSON.stringify({ prompt: text, model: modelName, deep: (options?.mode ?? agentMode) === 'research', automation: (options?.mode ?? agentMode) === 'tasks' })
+        })
+        if (res.ok) {
+          const { runId } = await res.json()
+          setCurrentRunId(runId)
+          // Attach SSE
+          const ev = new EventSource(base + `/api/events?run=${encodeURIComponent(runId)}`, { withCredentials: false } as any)
+          ev.onmessage = (m) => {
+            try {
+              const e = JSON.parse(m.data)
+              // Reuse existing event mapping (minimal)
+              const createdAt = e.created_at
+              const p = e.payload
+              if (p?.type === 'task_result' && typeof p.result === 'string') appendMessage({ id: `ai:${createdAt ?? Date.now()}`, role: 'ai', type: 'text', content: String(p.result) })
+              if (p?.type === 'run_complete') { setStatus('Idle'); setCurrentRunId(null); ev.close() }
+            } catch {}
+          }
+        } else {
+          appendMessage({ id: `error:${Date.now()}`, role: 'ai', type: 'text', content: `Remote agent error: ${res.status}` })
+          setStatus('Idle')
+        }
+      } catch (err) {
+        appendMessage({ id: `error:${Date.now()}`, role: 'ai', type: 'text', content: `Remote error: ${err instanceof Error ? err.message : 'Unknown error'}` })
+        setStatus('Idle')
+      }
       return
     }
     
