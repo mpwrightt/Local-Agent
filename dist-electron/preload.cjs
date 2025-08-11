@@ -10,6 +10,7 @@ import_electron.contextBridge.exposeInMainWorld("agent", {
   openPath: (input) => import_electron.ipcRenderer.invoke("agent/openPath", input),
   revealInFolder: (input) => import_electron.ipcRenderer.invoke("agent/revealInFolder", input),
   saveUploadedImage: (input) => import_electron.ipcRenderer.invoke("agent/saveUploadedImage", input),
+  readFileText: (input) => import_electron.ipcRenderer.invoke("agent/readFileText", input),
   onEvent: (handler) => {
     const listener = (_, payload) => handler(payload);
     import_electron.ipcRenderer.on("agent/event", listener);

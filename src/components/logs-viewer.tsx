@@ -62,6 +62,11 @@ export function LogsViewer({ logs, onClear }: LogsViewerProps) {
 
   const getLogIcon = (log: LogEntry) => {
     switch (log.type) {
+      case 'graph_extract_start':
+      case 'graph_extract_done':
+      case 'graph_synthesize_start':
+      case 'graph_synthesize_done':
+        return <Search className="h-3 w-3 text-purple-300" />
       case 'run_started':
         return <Play className="h-3 w-3 text-blue-400" />
       case 'task_result':

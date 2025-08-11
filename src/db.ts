@@ -7,7 +7,8 @@ import os from 'node:os'
 import { eventBus } from './agent/event_bus'
 
 const dataDir = path.join(os.homedir(), '.local-agent')
-const dbPath = path.join(dataDir, 'agent.db')
+const overridePath = process.env.LOCAL_AGENT_DB_PATH
+const dbPath = overridePath ? path.resolve(overridePath) : path.join(dataDir, 'agent.db')
 
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true })
 
@@ -43,6 +44,8 @@ sqliteDb.exec(`
     updated_at TEXT,
     PRIMARY KEY (id, run_id)
   );
+  CREATE INDEX IF NOT EXISTS idx_run_events_run_id_id ON run_events(run_id, id);
+  CREATE INDEX IF NOT EXISTS idx_tasks_run_id_id_status ON tasks(run_id, id, status);
 `)
 
 function newId(): string {
@@ -69,8 +72,8 @@ export const dbApi = {
     // Emit completion event for UI/notifications
     this.addRunEvent(runId, { type: 'run_complete' })
   },
-  addRunEvent(runId: string, payload: any) {
-    const created_at = new Date().toISOString()
+  addRunEvent(runId: string, payload: any, createdAtOverride?: string) {
+    const created_at = createdAtOverride ?? new Date().toISOString()
     sqliteDb.prepare('INSERT INTO run_events (run_id, created_at, payload) VALUES (?, ?, ?)')
       .run(runId, created_at, JSON.stringify(payload))
     eventBus.emit('event', { runId, created_at, payload })
@@ -111,6 +114,13 @@ export const dbApi = {
     }
     return results
   },
+  pruneOldData(retentionDays: number) {
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString()
+    sqliteDb.prepare('DELETE FROM run_events WHERE created_at < ?').run(cutoff)
+    sqliteDb.prepare('DELETE FROM runs WHERE finished_at IS NOT NULL AND finished_at < ?').run(cutoff)
+    sqliteDb.prepare('DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM runs)').run()
+    try { sqliteDb.prepare('VACUUM').run() } catch {}
+  }
 }
 
 export const db = dbApi

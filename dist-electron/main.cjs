@@ -65,7 +65,7 @@ var init_event_bus = __esm({
 function newId() {
   return "id-" + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
-var import_better_sqlite3, import_node_path, import_node_fs, import_node_os, dataDir, dbPath, sqliteDb, dbApi, db;
+var import_better_sqlite3, import_node_path, import_node_fs, import_node_os, dataDir, overridePath, dbPath, sqliteDb, dbApi, db;
 var init_db = __esm({
   "src/db.ts"() {
     init_cjs_shims();
@@ -75,7 +75,8 @@ var init_db = __esm({
     import_node_os = __toESM(require("os"), 1);
     init_event_bus();
     dataDir = import_node_path.default.join(import_node_os.default.homedir(), ".local-agent");
-    dbPath = import_node_path.default.join(dataDir, "agent.db");
+    overridePath = process.env.LOCAL_AGENT_DB_PATH;
+    dbPath = overridePath ? import_node_path.default.resolve(overridePath) : import_node_path.default.join(dataDir, "agent.db");
     if (!import_node_fs.default.existsSync(dataDir)) import_node_fs.default.mkdirSync(dataDir, { recursive: true });
     sqliteDb = new import_better_sqlite3.default(dbPath);
     sqliteDb.pragma("journal_mode = WAL");
@@ -108,6 +109,8 @@ var init_db = __esm({
     updated_at TEXT,
     PRIMARY KEY (id, run_id)
   );
+  CREATE INDEX IF NOT EXISTS idx_run_events_run_id_id ON run_events(run_id, id);
+  CREATE INDEX IF NOT EXISTS idx_tasks_run_id_id_status ON tasks(run_id, id, status);
 `);
     dbApi = {
       createSession(title) {
@@ -127,8 +130,8 @@ var init_db = __esm({
         sqliteDb.prepare("UPDATE runs SET status = ?, finished_at = ? WHERE id = ?").run("done", finished_at, runId);
         this.addRunEvent(runId, { type: "run_complete" });
       },
-      addRunEvent(runId, payload) {
-        const created_at = (/* @__PURE__ */ new Date()).toISOString();
+      addRunEvent(runId, payload, createdAtOverride) {
+        const created_at = createdAtOverride ?? (/* @__PURE__ */ new Date()).toISOString();
         sqliteDb.prepare("INSERT INTO run_events (run_id, created_at, payload) VALUES (?, ?, ?)").run(runId, created_at, JSON.stringify(payload));
         eventBus.emit("event", { runId, created_at, payload });
       },
@@ -166,6 +169,16 @@ var init_db = __esm({
           }
         }
         return results;
+      },
+      pruneOldData(retentionDays) {
+        const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1e3).toISOString();
+        sqliteDb.prepare("DELETE FROM run_events WHERE created_at < ?").run(cutoff);
+        sqliteDb.prepare("DELETE FROM runs WHERE finished_at IS NOT NULL AND finished_at < ?").run(cutoff);
+        sqliteDb.prepare("DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM runs)").run();
+        try {
+          sqliteDb.prepare("VACUUM").run();
+        } catch {
+        }
       }
     };
     db = dbApi;
@@ -309,6 +322,34 @@ async function spawnResearchAgent(ctx) {
     }
   };
   const normalizeTitle = (s) => s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  const extractSnippets = (fullText, query, maxSnippets = 3) => {
+    try {
+      const text = (fullText || "").replace(/\r\n/g, "\n");
+      const paras = text.split(/\n\s*\n+/);
+      const q = (query || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").trim();
+      const qWords = Array.from(new Set(q.split(/\s+/).filter((w) => w.length > 2)));
+      const scored = [];
+      for (let i = 0; i < paras.length; i++) {
+        const p = paras[i];
+        const lower = p.toLowerCase();
+        let score = 0;
+        for (const w of qWords) if (lower.includes(w)) score += 1;
+        if (score > 0) scored.push({ i, score, p });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      const chosen = scored.slice(0, maxSnippets);
+      const windowed = [];
+      for (const c of chosen) {
+        const before = paras[c.i - 1] ? paras[c.i - 1] + "\n" : "";
+        const after = paras[c.i + 1] ? "\n" + paras[c.i + 1] : "";
+        const snippet = (before + c.p + after).trim();
+        windowed.push(snippet.length > 1200 ? snippet.slice(0, 1200) + "\u2026" : snippet);
+      }
+      return windowed;
+    } catch {
+      return [];
+    }
+  };
   const domainWeight = {
     "reuters.com": 3,
     "apnews.com": 3,
@@ -614,18 +655,18 @@ async function spawnResearchAgent(ctx) {
       const baseDir2 = import_node_path2.default.join(import_node_os2.default.homedir(), ".local-agent");
       for (const item of tavilyDeferredLocal) {
         try {
-          const f = import_node_path2.default.join(baseDir2, `article-${slug(item.title)}-${Date.now()}.txt`);
           const cleanedRaw = cleanExtractedText(item.raw);
-          import_node_fs2.default.writeFileSync(f, cleanedRaw, "utf8");
-          articles.push({ title: item.title, url: item.url, path: f });
-          aggregateParts.push(`# ${item.title}
+          const snippets = extractSnippets(cleanedRaw, searchQuery);
+          const best = snippets.length > 0 ? snippets.join("\n\n") : cleanedRaw.slice(0, 1200);
+          const md = `# ${item.title}
 ${item.url}
 
-${cleanedRaw}
-
----
-
-`);
+> ${best.replace(/\n/g, "\n> ")}
+`;
+          const f = import_node_path2.default.join(baseDir2, `snippet-${slug(item.title)}-${Date.now()}.md`);
+          import_node_fs2.default.writeFileSync(f, md, "utf8");
+          articles.push({ title: item.title, url: item.url, path: f, snippet: best });
+          aggregateParts.push(md + "\n---\n\n");
         } catch {
         }
       }
@@ -647,17 +688,17 @@ ${cleanedRaw}
           const title = (r == null ? void 0 : r.title) || ((_e = finalTargets.find((t) => t.url === url)) == null ? void 0 : _e.title) || url;
           const text = cleanExtractedText(((r == null ? void 0 : r.content) || (r == null ? void 0 : r.text) || (r == null ? void 0 : r.markdown) || "").toString());
           if (url && text.trim().length > 200) {
-            const f = import_node_path2.default.join(baseDir, `article-${slug(title)}-${Date.now()}.txt`);
-            import_node_fs2.default.writeFileSync(f, text.slice(0, 16e3), "utf8");
-            articles.push({ title, url, path: f });
-            aggregateParts.push(`# ${title}
+            const snippets = extractSnippets(text, searchQuery);
+            const best = snippets.length > 0 ? snippets.join("\n\n") : text.slice(0, 1200);
+            const md = `# ${title}
 ${url}
 
-${text.slice(0, 16e3)}
-
----
-
-`);
+> ${best.replace(/\n/g, "\n> ")}
+`;
+            const f = import_node_path2.default.join(baseDir, `snippet-${slug(title)}-${Date.now()}.md`);
+            import_node_fs2.default.writeFileSync(f, md, "utf8");
+            articles.push({ title, url, path: f, snippet: best });
+            aggregateParts.push(md + "\n---\n\n");
           }
         }
         crawled = articles.length > 0;
@@ -681,17 +722,17 @@ ${text.slice(0, 16e3)}
             const title = ((_f = finalTargets.find((t) => t.url === url)) == null ? void 0 : _f.title) || url;
             const text = cleanExtractedText(((r == null ? void 0 : r.raw_content) || (r == null ? void 0 : r.content) || "").toString());
             if (url && text.trim().length > 200) {
-              const f = import_node_path2.default.join(baseDir, `article-${slug(title)}-${Date.now()}.txt`);
-              import_node_fs2.default.writeFileSync(f, text.slice(0, 16e3), "utf8");
-              articles.push({ title, url, path: f });
-              aggregateParts.push(`# ${title}
+              const snippets = extractSnippets(text, searchQuery);
+              const best = snippets.length > 0 ? snippets.join("\n\n") : text.slice(0, 1200);
+              const md = `# ${title}
 ${url}
 
-${text.slice(0, 16e3)}
-
----
-
-`);
+> ${best.replace(/\n/g, "\n> ")}
+`;
+              const f = import_node_path2.default.join(baseDir, `snippet-${slug(title)}-${Date.now()}.md`);
+              import_node_fs2.default.writeFileSync(f, md, "utf8");
+              articles.push({ title, url, path: f, snippet: best });
+              aggregateParts.push(md + "\n---\n\n");
             }
           }
           db.addRunEvent(ctx.runId, { type: "extract_result", taskId: ctx.task.id, count: results.length });
@@ -724,19 +765,17 @@ ${text.slice(0, 16e3)}
             return inner;
           });
           const cleaned = cleanExtractedText(text);
-          if (cleaned.trim().length > 200) {
-            const f = import_node_path2.default.join(baseDir, `article-${slug(t.title)}-${Date.now()}.txt`);
-            import_node_fs2.default.writeFileSync(f, cleaned, "utf8");
-            articles.push({ title: t.title, url: t.url, path: f });
-            aggregateParts.push(`# ${t.title}
+          const snippets = extractSnippets(cleaned, searchQuery);
+          const best = snippets.length > 0 ? snippets.join("\n\n") : cleaned.slice(0, 1200);
+          const md = `# ${t.title}
 ${t.url}
 
-${cleaned}
-
----
-
-`);
-          }
+> ${best.replace(/\n/g, "\n> ")}
+`;
+          const f = import_node_path2.default.join(baseDir, `snippet-${slug(t.title)}-${Date.now()}.md`);
+          import_node_fs2.default.writeFileSync(f, md, "utf8");
+          articles.push({ title: t.title, url: t.url, path: f, snippet: best });
+          aggregateParts.push(md + "\n---\n\n");
         } catch (err) {
           logger.warn({ err }, "Failed to scrape target");
         }
@@ -2467,31 +2506,67 @@ function detectShellTask(prompt) {
 // src/agent/graph.ts
 init_cjs_shims();
 var import_langgraph = require("@langchain/langgraph");
-var import_openai2 = __toESM(require("openai"), 1);
 var import_node_fs5 = __toESM(require("fs"), 1);
+init_db();
 var ResearchState = import_langgraph.Annotation.Root({
   prompt: (0, import_langgraph.Annotation)({ value: (_prev, next) => next }),
   deep: (0, import_langgraph.Annotation)({ value: (_prev, next) => next, default: () => false }),
   // artifacts
   targets: (0, import_langgraph.Annotation)({ value: (_prev, next) => next, default: () => [] }),
   aggregatePath: (0, import_langgraph.Annotation)({ value: (_prev, next) => next }),
-  synthesis: (0, import_langgraph.Annotation)({ value: (_prev, next) => next })
+  synthesis: (0, import_langgraph.Annotation)({ value: (_prev, next) => next }),
+  snippets: (0, import_langgraph.Annotation)({ value: (_prev, next) => next, default: () => [] }),
+  selected: (0, import_langgraph.Annotation)({ value: (_prev, next) => next, default: () => [] })
 });
-async function crawlNode(state) {
-  void state;
+async function prepareNode(_state) {
   return {};
 }
+function parseAggregate(aggregatePath) {
+  try {
+    if (!aggregatePath || !import_node_fs5.default.existsSync(aggregatePath)) return [];
+    const raw = import_node_fs5.default.readFileSync(aggregatePath, "utf8");
+    const blocks = raw.split(/\n---\n\n?/);
+    const out = [];
+    for (const b of blocks) {
+      const mTitle = b.match(/^#\s+(.+)$/m);
+      const mUrl = b.match(/^https?:\/\/\S+/m);
+      const quote = b.split(/\n\n/).slice(2).join("\n").trim() || b.trim();
+      if (mTitle && mUrl) {
+        const title = mTitle[1].trim();
+        const url = mUrl[0].trim();
+        const snippet = quote.replace(/^>\s?/gm, "").trim();
+        if (snippet) out.push({ title, url, snippet });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+async function extractNode(state) {
+  db.addRunEvent(state.runId ?? "", { type: "graph_extract_start", message: "Extracting snippets from aggregate" });
+  const snippets = parseAggregate(state.aggregatePath);
+  db.addRunEvent(state.runId ?? "", { type: "graph_extract_done", count: snippets.length });
+  return { snippets };
+}
 async function synthesizeNode(state) {
-  var _a, _b, _c;
+  var _a, _b, _c, _d, _e;
+  db.addRunEvent(state.runId ?? "", { type: "graph_synthesize_start", message: "Synthesizing final report" });
   const baseURL = process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
-  const client = new import_openai2.default({
-    baseURL,
-    apiKey: "not-needed"
-  });
+  async function getFetch2() {
+    const g = globalThis;
+    if (typeof g.fetch === "function") return g.fetch.bind(globalThis);
+    const mod = await import("node-fetch");
+    return mod.default;
+  }
   let model = process.env.LMSTUDIO_MODEL ?? "local-model";
   try {
-    const models = await client.models.list();
-    model = ((_a = models.data[0]) == null ? void 0 : _a.id) ?? "local-model";
+    const doFetch2 = await getFetch2();
+    const resp = await doFetch2(baseURL.replace(/\/$/, "") + "/models");
+    if (resp.ok) {
+      const data = await resp.json();
+      model = ((_b = (_a = data == null ? void 0 : data.data) == null ? void 0 : _a[0]) == null ? void 0 : _b.id) ?? model;
+    }
   } catch {
   }
   let corpus = "";
@@ -2503,6 +2578,8 @@ async function synthesizeNode(state) {
     }
   }
   const sourcesList = state.targets.map((t, i) => `[${i + 1}] ${t.title} - ${t.url}`).join("\n");
+  const snippetList = (state.selected.length > 0 ? state.selected : state.snippets).slice(0, 8).map((s, i) => `S${i + 1}: ${s.title} (${s.url})
+${s.snippet}`).join("\n\n");
   const prompt = `You are an expert technical analyst. Synthesize multiple sources into actionable insights.
 Requirements:
 - Produce 5-7 concise bullet takeaways that synthesize (do not list headlines)
@@ -2512,19 +2589,29 @@ Requirements:
 Question: ${state.prompt}
 Sources:
 ${sourcesList || "[none]"}
+Key snippets (truncated):
+${snippetList || "[no snippets]"}
 Corpus (truncated):
 ${corpus || "[no corpus available]"}`;
   const messages = [
     { role: "system", content: "Act as a meticulous analyst that cites sources and avoids hallucinations. Produce 5-7 concise bullets with inline [n] citations, then a 2-3 sentence implications paragraph for practitioners. If sources are weak or conflicting, note limitations explicitly." },
     { role: "user", content: prompt }
   ];
-  const res = await client.chat.completions.create({
-    model,
-    messages,
-    temperature: 0.1,
-    max_tokens: 700
-  });
-  const text = ((_c = (_b = res.choices[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) ?? "No synthesis generated";
+  const doFetch = await getFetch2();
+  let text = "No synthesis generated";
+  try {
+    const resp = await doFetch(baseURL.replace(/\/$/, "") + "/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer not-needed" },
+      body: JSON.stringify({ model, messages, temperature: 0.1, max_tokens: 700 })
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      text = ((_e = (_d = (_c = data == null ? void 0 : data.choices) == null ? void 0 : _c[0]) == null ? void 0 : _d.message) == null ? void 0 : _e.content) ?? text;
+    }
+  } catch {
+  }
+  db.addRunEvent(state.runId ?? "", { type: "graph_synthesize_done" });
   return { synthesis: text };
 }
 async function finalizeNode(state) {
@@ -2532,7 +2619,7 @@ async function finalizeNode(state) {
   return new import_langgraph.Command({ goto: import_langgraph.END });
 }
 function buildResearchGraph() {
-  const g = new import_langgraph.StateGraph(ResearchState).addNode("crawl", crawlNode).addNode("synthesize", synthesizeNode).addNode("finalize", finalizeNode).addEdge(import_langgraph.START, "crawl").addEdge("crawl", "synthesize").addEdge("synthesize", "finalize").compile();
+  const g = new import_langgraph.StateGraph(ResearchState).addNode("prepare", prepareNode).addNode("extract", extractNode).addNode("synthesize", synthesizeNode).addNode("finalize", finalizeNode).addEdge(import_langgraph.START, "prepare").addEdge("prepare", "extract").addEdge("extract", "synthesize").addEdge("synthesize", "finalize").compile();
   return g;
 }
 
@@ -2634,7 +2721,9 @@ async function executeTask(task, ctx, signal) {
             deep: Boolean(ctx.deep),
             targets: limitedTargets,
             aggregatePath,
-            synthesis: void 0
+            synthesis: void 0,
+            snippets: [],
+            selected: []
           };
           const out = await graph.invoke(stateIn);
           const summary = out.synthesis ?? "No synthesis produced.";
@@ -2674,8 +2763,8 @@ var import_zod2 = require("zod");
 init_db();
 var registry = /* @__PURE__ */ new Map();
 var pluginIds = /* @__PURE__ */ new Set();
-function registerWorker(role, id, runner, source = "builtin") {
-  registry.set(role, { id, role, runner, source });
+function registerWorker(role, id, runner, source = "builtin", lifecycle) {
+  registry.set(role, { id, role, runner, source, lifecycle });
 }
 var Capability = import_zod2.z.object({ role: import_zod2.z.string() });
 var ManifestSchema = import_zod2.z.object({
@@ -2705,9 +2794,10 @@ async function loadPlugins(pluginsDir) {
       const modPath = import_node_path6.default.isAbsolute(manifest.entrypoint) ? manifest.entrypoint : import_node_path6.default.join(dir, manifest.entrypoint);
       const mod = await import(pathToFileUrlSafe(modPath));
       const runner = typeof mod.default === "function" ? mod.default : mod.runner;
+      const lifecycle = mod.lifecycle;
       if (typeof runner !== "function") throw new Error(`Invalid plugin runner in ${manifest.id}`);
       for (const cap of manifest.capabilities) {
-        registerWorker(cap.role, manifest.id, runner, "plugin");
+        registerWorker(cap.role, manifest.id, runner, "plugin", lifecycle);
       }
       pluginIds.add(manifest.id);
       loaded++;
@@ -2762,16 +2852,16 @@ function watchPlugins(pluginsDir) {
 }
 
 // src/agent/runtime.ts
-init_db();
 init_confirm();
-var import_openai3 = __toESM(require("openai"), 1);
+var import_openai2 = __toESM(require("openai"), 1);
 
 // src/agent/config.ts
 init_cjs_shims();
 var import_node_fs8 = __toESM(require("fs"), 1);
 var import_node_path7 = __toESM(require("path"), 1);
 var import_node_os7 = __toESM(require("os"), 1);
-var CONFIG_DIR = import_node_path7.default.join(import_node_os7.default.homedir(), ".local-agent");
+var overrideDir = process.env.LOCAL_AGENT_CONFIG_DIR;
+var CONFIG_DIR = overrideDir ? import_node_path7.default.resolve(overrideDir) : import_node_path7.default.join(import_node_os7.default.homedir(), ".local-agent");
 var CONFIG_PATH = import_node_path7.default.join(CONFIG_DIR, "config.json");
 function readConfig() {
   try {
@@ -2797,9 +2887,103 @@ function setDefaultModel(model) {
   cfg.defaultModel = model;
   writeConfig(cfg);
 }
+function getRetentionDays() {
+  const d = readConfig().retentionDays;
+  return typeof d === "number" && d > 0 ? d : 14;
+}
+
+// src/agent/runtime.ts
+init_db();
+
+// src/agent/web.ts
+init_cjs_shims();
+async function getFetch() {
+  const g = globalThis;
+  if (typeof g.fetch === "function") return g.fetch.bind(globalThis);
+  return (input, init) => globalThis.fetch(input, init);
+}
+function htmlToText(html) {
+  let t = html.replace(/<script[\s\S]*?<\/script>/gi, "");
+  t = t.replace(/<style[\s\S]*?<\/style>/gi, "");
+  t = t.replace(/<[^>]+>/g, " ");
+  t = t.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+  return t.replace(/\s+/g, " ").trim();
+}
+async function quickSearch(query, count = 3) {
+  try {
+    const tavily = process.env.TAVILY_API_KEY;
+    const doFetch = await getFetch();
+    if (tavily) {
+      const resp2 = await doFetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tavily}` },
+        body: JSON.stringify({ query, include_answer: false, max_results: Math.max(1, Math.min(5, count)), search_depth: "basic", auto_parameters: true })
+      });
+      if (resp2.ok) {
+        const data = await resp2.json();
+        const results2 = Array.isArray(data == null ? void 0 : data.results) ? data.results : [];
+        return results2.slice(0, count).map((r) => ({ title: ((r == null ? void 0 : r.title) ?? "").toString() || (r == null ? void 0 : r.url) || "Result", url: ((r == null ? void 0 : r.url) ?? "").toString(), snippet: ((r == null ? void 0 : r.content) ?? "").toString().slice(0, 200) }));
+      }
+    }
+    const url = "https://duckduckgo.com/html/?kz=1&q=" + encodeURIComponent(query);
+    const resp = await doFetch(url);
+    const html = await resp.text();
+    const results = [];
+    const re = /<a[^>]+class="result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gim;
+    let m;
+    while ((m = re.exec(html)) && results.length < count) {
+      let href = m[1];
+      let title = htmlToText(m[2]);
+      try {
+        const u = new URL(href);
+        const uddg = u.searchParams.get("uddg");
+        if (uddg) href = decodeURIComponent(uddg);
+      } catch {
+      }
+      if (!title) title = href;
+      results.push({ title, url: href });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+async function fetchReadable(url, maxChars = 6e3) {
+  try {
+    const doFetch = await getFetch();
+    const proxy = "https://r.jina.ai/http/" + encodeURIComponent(url);
+    const resp = await doFetch(proxy, { redirect: "follow" });
+    if (!resp.ok) return "";
+    const text = await resp.text();
+    return text.slice(0, maxChars);
+  } catch {
+    return "";
+  }
+}
 
 // src/agent/runtime.ts
 function createAgentRuntime(ipcMain2) {
+  async function detectChatIntent(client, modelName, text) {
+    var _a, _b;
+    try {
+      const sys = 'You are an intent router. Return strict JSON only with fields: {"action": "answer|quick_web|open_url|summarize_url|to_tasks|to_research", "query?": string, "url?": string}. Choose quick_web for lightweight web lookup; to_research only if the user explicitly requests deep research.';
+      const res = await client.chat.completions.create({
+        model: modelName,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: text }
+        ],
+        temperature: 0,
+        max_tokens: 120,
+        response_format: { type: "json_object" }
+      });
+      const content = ((_b = (_a = res.choices[0]) == null ? void 0 : _a.message) == null ? void 0 : _b.content) ?? "{}";
+      const parsed = JSON.parse(content);
+      if (typeof (parsed == null ? void 0 : parsed.action) === "string") return parsed;
+    } catch {
+    }
+    return { action: "answer" };
+  }
   try {
     registerBuiltInWorkers();
   } catch {
@@ -2810,6 +2994,11 @@ function createAgentRuntime(ipcMain2) {
   }
   try {
     watchPlugins();
+  } catch {
+  }
+  try {
+    const runPrune = () => db.pruneOldData(getRetentionDays());
+    setInterval(runPrune, 24 * 60 * 60 * 1e3);
   } catch {
   }
   ipcMain2.handle("agent/startTask", async (_event, input) => {
@@ -2848,6 +3037,15 @@ function createAgentRuntime(ipcMain2) {
     } catch {
     }
   });
+  ipcMain2.handle("agent/readFileText", async (_event, input) => {
+    try {
+      const fs9 = await import("fs");
+      const content = fs9.readFileSync(input.path, "utf8");
+      return { success: true, content };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
   ipcMain2.handle("agent/saveUploadedImage", async (_event, input) => {
     const { tmpdir } = await import("os");
     const { join } = await import("path");
@@ -2870,10 +3068,12 @@ function createAgentRuntime(ipcMain2) {
     }
   });
   ipcMain2.handle("agent/simpleChat", async (_event, input) => {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f;
+    const searchEnabled = input.searchEnabled !== false;
+    const showThinking = input.showThinking !== false;
     try {
       const baseURL = process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
-      const client = new import_openai3.default({
+      const client = new import_openai2.default({
         baseURL,
         apiKey: "not-needed"
         // LM Studio doesn't require API key
@@ -2887,19 +3087,106 @@ function createAgentRuntime(ipcMain2) {
           modelName = "gpt-oss:20b";
         }
       }
+      const chatGuard = [
+        'You are Local Agent in Chat mode. You may use the provided "Web context (short)" if present, but you do not browse live.',
+        "Never output tool-call markup or channel tags. Cite web sources using Markdown links when you rely on the web context.",
+        'When helpful, start with a single line: "Reasoning (concise): ..." followed by the answer.'
+      ].join(" ");
+      const userText = ((_d = input.messages.slice().reverse().find((m) => m.role === "user")) == null ? void 0 : _d.content) ?? "";
+      const intent = searchEnabled ? await detectChatIntent(client, modelName, userText) : { action: "answer" };
+      const quickRegex = /\b(search|look up|find|news|latest|open|go to|happen|happened|going on|events|today|this week|this weekend|over the weekend)\b/i;
+      const wantsQuick = searchEnabled && (intent.action === "quick_web" || intent.action === "summarize_url" || intent.action === "open_url" || quickRegex.test(userText) || /https?:\/\//i.test(userText));
+      let quickContext;
+      let quickHits;
+      if (wantsQuick) {
+        try {
+          const urlFromIntent = intent.url && /^https?:\/\//i.test(intent.url) ? intent.url : void 0;
+          const urlMatch = urlFromIntent ? [urlFromIntent] : userText.match(/https?:\/\/\S+/);
+          if (urlMatch) {
+            const readable = await fetchReadable(urlMatch[0]);
+            if (readable) quickContext = `Source ${urlMatch[0]}
+
+${readable}`;
+            quickHits = [{ title: urlMatch[0], url: urlMatch[0] }];
+          } else {
+            const q = intent.query || userText.replace(/^\s*(?:please\s*)?(?:search|look up|find|check)\s*/i, "").trim();
+            const hits = await quickSearch(q, 3);
+            if (hits.length > 0) {
+              const top = hits[0];
+              const readable = await fetchReadable(top.url);
+              const list = hits.map((h, i) => `${i + 1}. ${h.title} - ${h.url}`).join("\n");
+              quickContext = `Top results for: ${q}
+${list}
+
+Primary source: ${top.url}
+
+${readable}`;
+              quickHits = hits;
+            }
+          }
+        } catch {
+        }
+      }
+      const guardedMessages = [
+        { role: "system", content: chatGuard },
+        ...quickContext ? [{ role: "system", content: `Web context (short):
+${quickContext}` }] : [],
+        ...input.messages
+      ];
+      const rl = input.reasoningLevel ?? "medium";
+      const limits = rl === "high" ? { maxTokens: 2048 } : rl === "low" ? { maxTokens: 256 } : { maxTokens: 1024 };
+      const reasoningHint = `reasoning: ${rl}`;
+      const systemIdx = guardedMessages.findIndex((m) => m.role === "system");
+      if (systemIdx >= 0) guardedMessages[systemIdx] = { role: "system", content: guardedMessages[systemIdx].content + `
+${reasoningHint}` };
       const response = await client.chat.completions.create({
         model: modelName,
-        messages: input.messages,
-        temperature: input.temperature ?? 0.7,
-        max_tokens: 2e3,
-        // Allow longer responses for chat
-        stream: false
+        messages: guardedMessages,
+        temperature: input.temperature ?? (rl === "high" ? 0.2 : rl === "low" ? 0.8 : 0.6),
+        max_tokens: limits.maxTokens,
+        stream: true
       });
-      const content = ((_e = (_d = response.choices[0]) == null ? void 0 : _d.message) == null ? void 0 : _e.content) ?? "No response generated";
+      let analysisBuf = "";
+      let finalBuf = "";
+      for await (const chunk of response) {
+        const delta = ((_f = (_e = chunk.choices[0]) == null ? void 0 : _e.delta) == null ? void 0 : _f.content) ?? "";
+        if (!delta) continue;
+        if (finalBuf.length === 0) {
+          analysisBuf += delta;
+        }
+        const reachedTok = analysisBuf.includes("<|final|>") || analysisBuf.includes("<final>");
+        if (reachedTok) {
+          const after = analysisBuf.split(/<\|final\|>|<final>/i).slice(1).join("") + delta;
+          finalBuf += after;
+        }
+      }
+      const text = finalBuf || analysisBuf;
+      const extract = (() => {
+        try {
+          const tagFinal = text.match(/<final>([\s\S]*?)<\/final>/i);
+          if (tagFinal == null ? void 0 : tagFinal[1]) return { content: tagFinal[1].trim(), thinking: analysisBuf.replace(/<final>[\s\S]*$/i, "").trim() };
+          const tokIdx = text.indexOf("<|final|>");
+          if (tokIdx >= 0) {
+            const rest = text.slice(tokIdx + "<|final|>".length);
+            const next = rest.search(/<\|[a-z]+\|>/i);
+            const content = (next >= 0 ? rest.slice(0, next) : rest).trim();
+            const think = analysisBuf.slice(0, tokIdx).trim();
+            return { content, thinking: think };
+          }
+        } catch {
+        }
+        return { content: text.trim(), thinking: "" };
+      })();
+      let cleaned = extract.content;
+      cleaned = cleaned.replace(/<\|[^>]+\|>/g, "");
+      cleaned = cleaned.replace(/^\s*commentary\s+to=[^\n]*$/gim, "");
+      cleaned = cleaned.replace(/^\s*code\s*\{[\s\S]*$/gim, "");
       return {
         success: true,
-        content,
-        model: modelName
+        content: cleaned,
+        model: modelName,
+        links: quickHits == null ? void 0 : quickHits.slice(0, 3),
+        thinking: showThinking ? extract.thinking : ""
       };
     } catch (error) {
       return {

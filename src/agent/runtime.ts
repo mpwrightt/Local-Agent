@@ -2,18 +2,44 @@ import type { IpcMain } from 'electron'
 import { shell } from 'electron'
 import { startOrchestrator, cancelRun as cancelRunById } from './scheduler'
 import { registerBuiltInWorkers, loadPlugins, watchPlugins } from './registry'
-import { db } from '../db'
 // import { logger } from '../shared/logger'
 // import { eventBus } from './event_bus'
 import { resolveConfirmation } from './confirm'
 import OpenAI from 'openai'
-import { getDefaultModel, setDefaultModel } from './config'
+import { getDefaultModel, setDefaultModel, getRetentionDays } from './config'
+import { db } from '../db'
+import { quickSearch, fetchReadable, type QuickResult } from './web'
 
 export function createAgentRuntime(ipcMain: IpcMain) {
+  async function detectChatIntent(client: OpenAI, modelName: string, text: string): Promise<{ action: string; query?: string; url?: string }> {
+    try {
+      const sys = 'You are an intent router. Return strict JSON only with fields: {"action": "answer|quick_web|open_url|summarize_url|to_tasks|to_research", "query?": string, "url?": string}. Choose quick_web for lightweight web lookup; to_research only if the user explicitly requests deep research.'
+      const res = await client.chat.completions.create({
+        model: modelName,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: text }
+        ],
+        temperature: 0,
+        max_tokens: 120,
+        response_format: { type: 'json_object' }
+      })
+      const content = res.choices[0]?.message?.content ?? '{}'
+      const parsed = JSON.parse(content)
+      if (typeof parsed?.action === 'string') return parsed
+    } catch {}
+    return { action: 'answer' }
+  }
   // Register built-ins and try loading plugins once at startup
   try { registerBuiltInWorkers() } catch {}
   try { void loadPlugins() } catch {}
   try { watchPlugins() } catch {}
+
+  // Schedule daily DB pruning
+  try {
+    const runPrune = () => db.pruneOldData(getRetentionDays())
+    setInterval(runPrune, 24 * 60 * 60 * 1000)
+  } catch {}
   ipcMain.handle('agent/startTask', async (_event, input: { prompt: string; model?: string; deep?: boolean; dryRun?: boolean; automation?: boolean }) => {
     const sessionId = db.createSession(input.prompt)
     const runId = db.createRun(sessionId)
@@ -48,6 +74,16 @@ export function createAgentRuntime(ipcMain: IpcMain) {
 
   ipcMain.handle('agent/revealInFolder', async (_event, input: { path: string }) => {
     try { shell.showItemInFolder(input.path) } catch {}
+  })
+
+  ipcMain.handle('agent/readFileText', async (_event, input: { path: string }) => {
+    try {
+      const fs = await import('node:fs')
+      const content = fs.readFileSync(input.path, 'utf8')
+      return { success: true, content }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
   })
 
   // Save uploaded image to temp file
@@ -86,7 +122,10 @@ export function createAgentRuntime(ipcMain: IpcMain) {
     messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
     model?: string;
     temperature?: number;
+    reasoningLevel?: 'low' | 'medium' | 'high'
   }) => {
+    const searchEnabled = (input as any).searchEnabled !== false
+    const showThinking = (input as any).showThinking !== false
     try {
       // LM Studio OpenAI-compatible API configuration
       const baseURL = process.env.LMSTUDIO_HOST ?? 'http://127.0.0.1:1234/v1'
@@ -110,20 +149,108 @@ export function createAgentRuntime(ipcMain: IpcMain) {
         }
       }
       
+      // Guardrails: Chat mode uses lightweight fetched context only; no tool-call markup, no browsing claims.
+      const chatGuard = [
+        'You are Local Agent in Chat mode. You may use the provided "Web context (short)" if present, but you do not browse live.',
+        'Never output tool-call markup or channel tags. Cite web sources using Markdown links when you rely on the web context.',
+        'When helpful, start with a single line: "Reasoning (concise): ..." followed by the answer.'
+      ].join(' ')
+
+      // Detect intent via a lightweight JSON router
+      const userText = input.messages.slice().reverse().find(m => m.role === 'user')?.content ?? ''
+      const intent = searchEnabled ? await detectChatIntent(client, modelName, userText) : { action: 'answer' as const }
+      const quickRegex = /\b(search|look up|find|news|latest|open|go to|happen|happened|going on|events|today|this week|this weekend|over the weekend)\b/i
+      const wantsQuick = searchEnabled && (intent.action === 'quick_web' || intent.action === 'summarize_url' || intent.action === 'open_url' || quickRegex.test(userText) || (/https?:\/\//i.test(userText)))
+      let quickContext: string | undefined
+      let quickHits: QuickResult[] | undefined
+      if (wantsQuick) {
+        try {
+          const urlFromIntent = intent.url && /^https?:\/\//i.test(intent.url) ? intent.url : undefined
+          const urlMatch = urlFromIntent ? [urlFromIntent] as unknown as RegExpMatchArray : userText.match(/https?:\/\/\S+/)
+          if (urlMatch) {
+            const readable = await fetchReadable(urlMatch[0])
+            if (readable) quickContext = `Source ${urlMatch[0]}\n\n${readable}`
+            quickHits = [{ title: urlMatch[0], url: urlMatch[0] }]
+          } else {
+            const q = intent.query || userText.replace(/^\s*(?:please\s*)?(?:search|look up|find|check)\s*/i, '').trim()
+            const hits = await quickSearch(q, 3)
+            if (hits.length > 0) {
+              const top = hits[0]
+              const readable = await fetchReadable(top.url)
+              const list = hits.map((h, i) => `${i + 1}. ${h.title} - ${h.url}`).join('\n')
+              quickContext = `Top results for: ${q}\n${list}\n\nPrimary source: ${top.url}\n\n${readable}`
+              quickHits = hits
+            }
+          }
+        } catch {}
+      }
+
+      const guardedMessages = [
+        { role: 'system' as const, content: chatGuard },
+        ...(quickContext ? [{ role: 'system' as const, content: `Web context (short):\n${quickContext}` }] : []),
+        ...input.messages,
+      ]
+
+      // Inject Harmony-style reasoning level hint
+      const rl = input.reasoningLevel ?? 'medium'
+      const limits = rl === 'high' ? { maxTokens: 2048 } : rl === 'low' ? { maxTokens: 256 } : { maxTokens: 1024 }
+      const reasoningHint = `reasoning: ${rl}`
+      const systemIdx = guardedMessages.findIndex(m => m.role === 'system')
+      if (systemIdx >= 0) guardedMessages[systemIdx] = { role: 'system', content: guardedMessages[systemIdx].content + `\n${reasoningHint}` }
+
+      // Stream tokens so we can emit a dynamic thinking box when model uses analysis/commentary
       const response = await client.chat.completions.create({
         model: modelName,
-        messages: input.messages,
-        temperature: input.temperature ?? 0.7,
-        max_tokens: 2000, // Allow longer responses for chat
-        stream: false
+        messages: guardedMessages,
+        temperature: input.temperature ?? (rl === 'high' ? 0.2 : rl === 'low' ? 0.8 : 0.6),
+        max_tokens: limits.maxTokens,
+        stream: true
       })
+      let analysisBuf = ''
+      let finalBuf = ''
+      for await (const chunk of response) {
+        const delta = chunk.choices[0]?.delta?.content ?? ''
+        if (!delta) continue
+        // Heuristic: accumulate analysis until we see <|final|> or <final>
+        if (finalBuf.length === 0) {
+          analysisBuf += delta
+        }
+        const reachedTok = analysisBuf.includes('<|final|>') || analysisBuf.includes('<final>')
+        if (reachedTok) {
+          const after = analysisBuf.split(/<\|final\|>|<final>/i).slice(1).join('') + delta
+          finalBuf += after
+        }
+      }
+      // Fallback if model streamed only one buffer
+      const text = (finalBuf || analysisBuf)
+      const extract = (() => {
+        try {
+          const tagFinal = text.match(/<final>([\s\S]*?)<\/final>/i)
+          if (tagFinal?.[1]) return { content: tagFinal[1].trim(), thinking: analysisBuf.replace(/<final>[\s\S]*$/i, '').trim() }
+          const tokIdx = text.indexOf('<|final|>')
+          if (tokIdx >= 0) {
+            const rest = text.slice(tokIdx + '<|final|>'.length)
+            const next = rest.search(/<\|[a-z]+\|>/i)
+            const content = (next >= 0 ? rest.slice(0, next) : rest).trim()
+            const think = analysisBuf.slice(0, tokIdx).trim()
+            return { content, thinking: think }
+          }
+        } catch {}
+        return { content: text.trim(), thinking: '' }
+      })()
 
-      const content = response.choices[0]?.message?.content ?? 'No response generated'
+      // Sanitize visible content
+      let cleaned = extract.content
+      cleaned = cleaned.replace(/<\|[^>]+\|>/g, '')
+      cleaned = cleaned.replace(/^\s*commentary\s+to=[^\n]*$/gim, '')
+      cleaned = cleaned.replace(/^\s*code\s*\{[\s\S]*$/gim, '')
 
-      return { 
-        success: true, 
-        content,
-        model: modelName
+      return {
+        success: true,
+        content: cleaned,
+        model: modelName,
+        links: quickHits?.slice(0, 3),
+        thinking: showThinking ? extract.thinking : ''
       }
     } catch (error) {
       return { 
