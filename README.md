@@ -1,69 +1,48 @@
-# React + TypeScript + Vite
+# Local Agent (Vite + React)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Modern local agent UI with Electron bridge, optional browser Chat fallback, and Vercel-ready proxy for LM Studio.
 
-Currently, two official plugins are available:
+## Dev
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default tseslint.config([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      ...tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      ...tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      ...tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm i
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+- Electron window provides full capabilities (Tasks/Research via OS automation).
+- Browser at http://localhost:5173 supports Chat and quick search.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Build
 
-export default tseslint.config([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run build
+npm run start:prod
 ```
+
+## Vercel deployment (UI + LM proxy)
+
+This repo includes a serverless proxy at `api/lm/[...path].ts` so the web UI can call an OpenAI-compatible endpoint without CORS issues.
+
+1) Set env var on Vercel:
+- `LM_PROXY_BASE` → LM Studio/OpenAI-compatible base URL, e.g.:
+  - `http://127.0.0.1:1234` (via a tunnel like ngrok)
+  - `https://YOUR_SUBDOMAIN.ngrok.app`
+
+2) Deploy
+- Build command: `npm run build`
+- Output dir: `dist`
+- The included `vercel.json` routes `/lm/*` to the proxy and serves `/dist`.
+
+In the browser, Chat calls `/lm/v1/...`, which the proxy forwards to `LM_PROXY_BASE`.
+
+## Remote Tasks/Research
+
+Tasks/Research require a local agent on your Mac (for shell/file automation and app control). Next step:
+- Add a lightweight HTTP/WS agent service
+- Expose it via ngrok (or Cloudflare Tunnel)
+- Wire the UI to a “Remote mode” that targets the agent service
+
+## Configuration
+
+- LM Studio base (browser mode): `/lm/v1` (proxied in dev/preview and Vercel)
+- Electron bridge: available automatically in Electron app via `window.agent`
