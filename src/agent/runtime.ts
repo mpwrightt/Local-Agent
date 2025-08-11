@@ -209,6 +209,7 @@ export function createAgentRuntime(ipcMain: IpcMain) {
       if (systemIdx >= 0) guardedMessages[systemIdx] = { role: 'system', content: guardedMessages[systemIdx].content + `\n${reasoningHint}` }
 
       // Stream tokens so we can emit a dynamic thinking box when model uses analysis/commentary
+<<<<<<< HEAD
       const resp = await client.chat(guardedMessages as any, modelName, { temperature: input.temperature ?? (rl === 'high' ? 0.2 : rl === 'low' ? 0.8 : 0.6), stream: false })
       const jj: any = await resp.json()
       const contentAll: string = jj?.choices?.[0]?.message?.content ?? ''
@@ -242,6 +243,58 @@ export function createAgentRuntime(ipcMain: IpcMain) {
         success: true,
         content: cleaned,
         model: modelName,
+=======
+      const response = await client.chat.completions.create({
+        model: modelName,
+        messages: guardedMessages,
+        temperature: input.temperature ?? (rl === 'high' ? 0.2 : rl === 'low' ? 0.8 : 0.6),
+        max_tokens: limits.maxTokens,
+        stream: true
+      })
+      let analysisBuf = ''
+      let finalBuf = ''
+      for await (const chunk of response) {
+        const delta = chunk.choices[0]?.delta?.content ?? ''
+        if (!delta) continue
+        // Heuristic: accumulate analysis until we see <|final|> or <final>
+        if (finalBuf.length === 0) {
+          analysisBuf += delta
+        }
+        const reachedTok = analysisBuf.includes('<|final|>') || analysisBuf.includes('<final>')
+        if (reachedTok) {
+          const after = analysisBuf.split(/<\|final\|>|<final>/i).slice(1).join('') + delta
+          finalBuf += after
+        }
+      }
+      // Fallback if model streamed only one buffer
+      const text = (finalBuf || analysisBuf)
+      const extract = (() => {
+        try {
+          const tagFinal = text.match(/<final>([\s\S]*?)<\/final>/i)
+          if (tagFinal?.[1]) return { content: tagFinal[1].trim(), thinking: analysisBuf.replace(/<final>[\s\S]*$/i, '').trim() }
+          const tokIdx = text.indexOf('<|final|>')
+          if (tokIdx >= 0) {
+            const rest = text.slice(tokIdx + '<|final|>'.length)
+            const next = rest.search(/<\|[a-z]+\|>/i)
+            const content = (next >= 0 ? rest.slice(0, next) : rest).trim()
+            const think = analysisBuf.slice(0, tokIdx).trim()
+            return { content, thinking: think }
+          }
+        } catch {}
+        return { content: text.trim(), thinking: '' }
+      })()
+
+      // Sanitize visible content
+      let cleaned = extract.content
+      cleaned = cleaned.replace(/<\|[^>]+\|>/g, '')
+      cleaned = cleaned.replace(/^\s*commentary\s+to=[^\n]*$/gim, '')
+      cleaned = cleaned.replace(/^\s*code\s*\{[\s\S]*$/gim, '')
+
+      return {
+        success: true,
+        content: cleaned,
+        model: modelName,
+>>>>>>> origin/main
         links: quickHits?.slice(0, 3),
         thinking: showThinking ? extract.thinking : ''
       }

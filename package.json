@@ -11,8 +11,12 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "start:prod": "cross-env NODE_ENV=production electron dist-electron/main.cjs",
+<<<<<<< HEAD
     "agent:serve": "tsx src/agent/web_server.ts",
     "tunnel": "node scripts/tunnel.mjs"
+=======
+    "agent:serve": "ts-node-esm src/agent/web_server.ts"
+>>>>>>> origin/main
   },
   "dependencies": {
     "@langchain/core": "^0.3.26",
@@ -72,6 +76,7 @@
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.39.0",
     "vite": "^7.1.0",
+    "ts-node": "^10.9.2",
     "vitest": "^3.2.4"
   },
   "bin": {
