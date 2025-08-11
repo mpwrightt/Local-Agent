@@ -1,0 +1,436 @@
+import { useEffect, useMemo, useState } from 'react'
+import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
+import { AppSidebar } from '@/components/app-sidebar'
+import { ChatInput, type AgentMode } from '@/components/chat-input'
+import { ChatMessageBubble, type ChatMessage as V0ChatMessage } from '@/components/chat-message'
+import { LogsViewer, eventToLogEntry } from '@/components/logs-viewer'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Button } from '@/components/ui/button'
+
+type AgentPayload = {
+  type?: string
+  result?: unknown
+  model?: string
+  screenshot?: string
+  aggregatePath?: string
+  articles?: Array<{ title?: string; url?: string; path: string }>
+  path?: string
+  dest?: string
+  results?: string[]
+}
+type RunEvent = { created_at?: string; payload: AgentPayload; runId: string }
+
+type Conversation = {
+  id: string
+  title: string
+  preview: string
+  messages: V0ChatMessage[]
+}
+
+export default function App() {
+  const [status, setStatus] = useState<'Idle' | 'Listening' | 'Thinking' | 'Executing'>('Idle')
+  const [modelName] = useState<string>('modelqmxfp4')
+  const [agentMode, setAgentMode] = useState<AgentMode>('chat')
+  const [activeTab, setActiveTab] = useState<'chat' | 'logs'>('chat')
+  const [logs, setLogs] = useState<Array<ReturnType<typeof eventToLogEntry>>>([])
+  const [currentRunId, setCurrentRunId] = useState<string | null>(null)
+  const [conversations, setConversations] = useState<Conversation[]>([
+    { id: 'conv-1', title: 'New chat', preview: '', messages: [] },
+  ])
+  const [activeId, setActiveId] = useState<string>('conv-1')
+  const [uploadedImage, setUploadedImage] = useState<{
+    file: File
+    dataUrl: string
+    name: string
+  } | null>(null)
+
+  const agentAny = (typeof window !== 'undefined'
+    ? (window as unknown as { agent?: {
+        startTask?: (input: { prompt: string; model?: string; deep?: boolean; dryRun?: boolean; automation?: boolean }) => Promise<{ runId: string }>
+        simpleChat?: (input: { messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>; model?: string; temperature?: number }) => Promise<{ success: boolean; content: string; error?: string; model?: string }>
+        confirmDangerous?: (input: { runId: string; taskId: string; confirm: boolean }) => Promise<void>
+        cancelRun?: (input: { runId: string }) => Promise<void>
+        openPath?: (input: { path: string }) => Promise<void>
+        revealInFolder?: (input: { path: string }) => Promise<void>
+        saveUploadedImage?: (input: { dataUrl: string; fileName: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>
+        onEvent?: (handler: (event: RunEvent) => void) => () => void
+      } })?.agent
+    : undefined)
+  const hasAgent = Boolean(agentAny && typeof agentAny.onEvent === 'function')
+
+  const activeConversation = conversations.find((c) => c.id === activeId)!
+
+  function appendMessage(msg: V0ChatMessage) {
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === activeId
+          ? {
+              ...c,
+              messages: [...c.messages, msg],
+              preview: (msg.content || '').slice(0, 32),
+              title: c.title === 'New chat' && msg.role === 'user' && msg.content ? msg.content.slice(0, 60) : c.title,
+            }
+          : c,
+      ),
+    )
+  }
+
+  async function handleFileAction(action: string, path: string) {
+    if (!agentAny) return
+    
+    try {
+      if (action === 'open') {
+        await agentAny.openPath?.({ path })
+      } else if (action === 'reveal') {
+        await agentAny.revealInFolder?.({ path })
+      }
+    } catch (error) {
+      console.error('File action failed:', error)
+    }
+  }
+
+  const handleImageUpload = async (file: File) => {
+    // Create data URL for preview
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string
+      
+      // Set the uploaded image state for preview
+      setUploadedImage({
+        file,
+        dataUrl,
+        name: file.name
+      })
+    }
+    
+    reader.readAsDataURL(file)
+  }
+
+  const handleRemoveImage = () => {
+    setUploadedImage(null)
+  }
+
+  async function handleStop() {
+    if (!agentAny || !currentRunId) return
+    try {
+      await agentAny.cancelRun?.({ runId: currentRunId })
+    } catch (error) {
+      console.error('Stop failed:', error)
+    } finally {
+      // Optimistically reflect cancellation in UI; backend will also emit run_cancelled
+      setStatus('Idle')
+      setCurrentRunId(null)
+    }
+  }
+
+  function handleClearLogs() {
+    setLogs([])
+  }
+
+  useEffect(() => {
+    if (!hasAgent) return
+    const off = agentAny!.onEvent!((e: RunEvent) => {
+      const p = e?.payload
+      if (!p?.type) return
+      
+      // Add to logs
+      const runId = e.runId || currentRunId || 'unknown'
+      const logEntry = eventToLogEntry(e, runId)
+      setLogs(prev => [...prev, logEntry])
+      
+      // Handle status changes
+      if (p.type === 'run_started') {
+        setStatus('Thinking')
+        setCurrentRunId(runId)
+      }
+      // Do not mark Idle on task_result; wait for run_complete to keep Stop active during post-task events
+      if (p.type === 'error') {
+        setStatus('Idle')
+        setCurrentRunId(null)
+      }
+      if (p.type === 'task_start' || (p.type === 'task_status' && (p as any).status === 'running')) {
+        setStatus('Executing')
+      }
+      if (['ocr_start','ocr_process_start','ocr_batch_start','ocr_file_start'].includes(p.type)) {
+        setStatus('Executing')
+      }
+      if (p.type === 'run_complete') {
+        setStatus('Idle')
+        setCurrentRunId(null)
+      }
+      if (p.type === 'run_cancelled') {
+        setStatus('Idle')
+        setCurrentRunId(null)
+      }
+      if (p.type === 'confirm_dangerous') {
+        const anyPayload = p as unknown as { runId?: string; taskId?: string; path?: string; op?: string }
+        const open = confirm(`Confirm ${anyPayload.op ?? 'operation'} for:\n${anyPayload.path ?? ''}\n\nThis cannot be undone. Proceed?`)
+        if (anyPayload.runId && anyPayload.taskId) agentAny!.confirmDangerous?.({ runId: anyPayload.runId, taskId: anyPayload.taskId, confirm: open })
+        return
+      }
+      // Map events to chat messages
+      const createdAt = e.created_at
+      if (p.type === 'task_result') {
+        const text = typeof p.result === 'string' ? p.result : 'Task complete.'
+        appendMessage({ id: `ai:${createdAt ?? Date.now()}`, role: 'ai', type: 'text', content: text })
+      } else if (p.type === 'ocr_response') {
+        // Direct OCR response for uploaded images
+        const payload = p as any
+        appendMessage({
+          id: `ocr:${createdAt ?? Date.now()}`,
+          role: 'ai',
+          type: 'text',
+          content: payload.message || 'OCR processing completed.'
+        })
+      } else if (p.type === 'file_located') {
+        // Convert file_located events to file operation messages with action buttons
+        const payload = p as any
+        const results = payload.results || []
+        const query = payload.query || ''
+        const searchType = payload.searchType || 'filename'
+        const ocrResults = payload.ocrResults || []
+        
+        appendMessage({ 
+          id: `file:${createdAt ?? Date.now()}`, 
+          role: 'ai', 
+          type: 'file_operation', 
+          content: `Found ${results.length} result(s) for "${query}"${searchType === 'content' ? ' (OCR search)' : ''}`,
+          file_operation: {
+            operation: 'locate',
+            query,
+            results: results.map((path: string) => ({
+              path,
+              type: path.includes('.') && !path.endsWith('/') ? 'file' : 'folder'
+            })),
+            success: results.length > 0,
+            searchType,
+            ocrResults
+          }
+        })
+      } else if (['research_result', 'file_write', 'file_renamed'].includes(p.type)) {
+        const json = JSON.stringify(p, null, 2)
+        appendMessage({ id: `tool:${createdAt ?? Date.now()}`, role: 'ai', type: 'code', content: json, code: { language: 'json', code: json } })
+      }
+    })
+    return () => off?.()
+  }, [hasAgent, agentAny, activeId])
+
+  async function handleSend(text: string, options?: { mode?: AgentMode }) {
+    const userMsg: V0ChatMessage = {
+      id: `user:${Date.now()}`,
+      role: 'user' as const,
+      type: uploadedImage ? 'image' as const : 'text' as const,
+      content: text,
+      ...(uploadedImage && {
+        image: {
+          src: uploadedImage.dataUrl,
+          alt: uploadedImage.name
+        }
+      })
+    }
+    appendMessage(userMsg)
+    
+    // Clear the uploaded image after sending
+    if (uploadedImage) {
+      setUploadedImage(null)
+    }
+    
+    if (!hasAgent) {
+      alert('Agent bridge not available. Ensure you are running inside Electron (not the browser).')
+      return
+    }
+    
+    setStatus('Thinking')
+    const mode = options?.mode ?? agentMode
+    
+    // Handle uploaded image for OCR processing
+    let processedText = text
+    let effectiveMode = mode
+    
+    if (uploadedImage) {
+      // Auto-switch to Tasks mode for OCR processing when image is uploaded
+      effectiveMode = 'tasks'
+      
+      try {
+        const saveResult = await agentAny!.saveUploadedImage!({
+          dataUrl: uploadedImage.dataUrl,
+          fileName: uploadedImage.name
+        })
+        
+        if (saveResult?.success && saveResult.filePath) {
+          // Modify the text to include the image path for OCR processing
+          processedText = `[UPLOADED_IMAGE_PATH:${saveResult.filePath}] ${text}`
+        }
+      } catch (error) {
+        console.error('Failed to save uploaded image:', error)
+      }
+    }
+    
+    if (effectiveMode === 'chat') {
+      // Simple chat mode - direct LM Studio conversation
+      try {
+        const chatHistory = activeConversation.messages
+          .filter(m => m.role === 'user' || m.role === 'ai')
+          .slice(-10) // Keep last 10 messages for context
+          .map(m => ({
+            role: m.role === 'ai' ? 'assistant' as const : m.role as 'user',
+            content: m.content || ''
+          }))
+        
+        chatHistory.push({ role: 'user', content: processedText })
+        
+        const result = await agentAny!.simpleChat!({
+          messages: chatHistory,
+          model: modelName,
+          temperature: 0.7
+        })
+        
+        if (result.success) {
+          appendMessage({ 
+            id: `ai:${Date.now()}`, 
+            role: 'ai', 
+            type: 'text', 
+            content: result.content 
+          })
+        } else {
+          appendMessage({ 
+            id: `error:${Date.now()}`, 
+            role: 'ai', 
+            type: 'text', 
+            content: result.content || result.error || 'An error occurred'
+          })
+        }
+      } catch (error) {
+        appendMessage({ 
+          id: `error:${Date.now()}`, 
+          role: 'ai', 
+          type: 'text', 
+          content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`
+        })
+      }
+      setStatus('Idle')
+        } else if (effectiveMode === 'tasks') {
+      // Tasks mode - AI agent with Mac control, file ops, browser automation
+      const result = await agentAny!.startTask!({
+        prompt: processedText,
+        model: modelName,
+        deep: false, // Tasks don't need deep research
+        automation: true // Enable automation capabilities
+      })
+      setCurrentRunId(result.runId)
+    } else if (effectiveMode === 'research') {
+      // Research mode - AI agent with web research and synthesis
+      const result = await agentAny!.startTask!({ 
+        prompt: processedText, 
+        model: modelName, 
+        deep: true // Enable deep research
+      })
+      setCurrentRunId(result.runId)
+    }
+  }
+
+  function handleSelectConversation(id: string) {
+    setActiveId(id)
+  }
+
+  function handleNewConversation() {
+    const id = `conv-${Date.now()}`
+    setConversations((prev) => [{ id, title: 'New chat', preview: '', messages: [] }, ...prev])
+    setActiveId(id)
+  }
+
+  const sidebarConversations = useMemo(
+    () => conversations.map((c) => ({ ...c })),
+    [conversations],
+  )
+
+  return (
+    <SidebarProvider>
+      <AppSidebar status={status} conversations={sidebarConversations as any} activeId={activeId} onSelectConversation={handleSelectConversation} />
+      <SidebarInset className="bg-[oklch(var(--background))] text-white h-svh flex flex-col overflow-hidden min-h-0" data-scheme="violet">
+        <header className="sticky top-0 z-50 border-b border-white/10 bg-[oklch(var(--background))]/80 backdrop-blur supports-[backdrop-filter]:bg-[oklch(var(--background))]/60">
+          <div className="flex items-center justify-between px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-white/90">Local Agent</span>
+              <span className="hidden md:inline text-[11px] text-white/50">Electron + Vite</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={handleNewConversation}>New Chat</Button>
+            </div>
+          </div>
+          
+          {/* Tabs */}
+          <div className="flex border-t border-white/10">
+            <button
+              onClick={() => setActiveTab('chat')}
+              className={`flex-1 px-4 py-2 text-sm font-medium transition ${
+                activeTab === 'chat'
+                  ? 'text-white bg-white/5 border-b-2 border-purple-400'
+                  : 'text-white/60 hover:text-white/80 hover:bg-white/5'
+              }`}
+            >
+              Chat
+            </button>
+            <button
+              onClick={() => setActiveTab('logs')}
+              className={`flex-1 px-4 py-2 text-sm font-medium transition relative ${
+                activeTab === 'logs'
+                  ? 'text-white bg-white/5 border-b-2 border-purple-400'
+                  : 'text-white/60 hover:text-white/80 hover:bg-white/5'
+              }`}
+            >
+              Logs
+              {logs.length > 0 && (
+                <span className="absolute -top-1 -right-1 h-2 w-2 bg-blue-400 rounded-full"></span>
+              )}
+            </button>
+          </div>
+        </header>
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+          {activeTab === 'chat' ? (
+            <>
+              <ScrollArea className="flex-1 min-h-0">
+                <div className="flex justify-center p-4">
+                  <div className="w-full max-w-3xl space-y-3">
+                    {activeConversation.messages.length === 0 ? (
+                      <div className="mx-auto mt-24 max-w-md rounded-xl border border-white/10 bg-white/5 p-5 text-center text-sm text-white/70">
+                        <div>No messages yet</div>
+                        <div className="mt-1 text-white/50">Ask the agent to perform a task. Results will stream here.</div>
+                      </div>
+                    ) : (
+                      activeConversation.messages.map((m) => (
+                        <ChatMessageBubble key={m.id} message={m} onFileAction={handleFileAction} />
+                      ))
+                    )}
+                  </div>
+                </div>
+              </ScrollArea>
+              <div className="border-t border-white/10 p-3 sticky bottom-0 z-40 bg-[oklch(var(--background))]/80 backdrop-blur supports-[backdrop-filter]:bg-[oklch(var(--background))]/60">
+                <div className="flex justify-center">
+                  <div className="w-full max-w-3xl">
+                    <ChatInput 
+                      status={status} 
+                      running={!!currentRunId}
+                      onStatusChange={setStatus} 
+                      onSend={handleSend}
+                      onUpload={handleImageUpload}
+                      onStop={handleStop}
+                      agentMode={agentMode}
+                      onAgentModeChange={setAgentMode}
+                      uploadedImage={uploadedImage}
+                      onRemoveImage={handleRemoveImage}
+                    />
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <LogsViewer logs={logs} onClear={handleClearLogs} />
+          )}
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
+  )
+}
+
+

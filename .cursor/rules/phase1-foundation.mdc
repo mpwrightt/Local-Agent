@@ -1,0 +1,30 @@
+---
+description: Guidance for Phase 1 tasks (plugin system, orchestration, comms, DB/UX)
+globs: *.ts,*.tsx
+---
+# Phase 1 Implementation Rules
+
+## Plugin Architecture
+- Create worker manifests as JSON under `src/plugins/<worker>/manifest.json`.
+- Manifests must conform to a zod schema (id, version, capabilities, permissions, entrypoint).
+- Dynamic load workers via a central registry module `src/agent/registry.ts`.
+- Workers expose lifecycle: `init(ctx)`, `start(task)`, `stop()`, `dispose()`.
+- Enforce least‑privilege via a permission map; prompt the user (IPC) when a permission is escalated.
+
+## Orchestration Enhancements
+- Extend task plan items to include `budgets: { seconds?: number; tokens?: number }` and honor them.
+- Add execution DSL constructs for conditional branches and retries; guard against infinite loops.
+- Run independent tasks in waves (see [src/agent/scheduler.ts](mdc:src/agent/scheduler.ts)).
+
+## Communication & Events
+- Standardize run events to `{ type, taskId?, data?, message? }` envelopes.
+- Stream partial results where possible. Emit `*_start`, `*_complete`, and `*_error` consistently.
+- Use [src/db.ts](mdc:src/db.ts) to persist events and add indices before high‑volume changes.
+
+## DB & Hygiene
+- Before adding new queries, add indices: `run_events(run_id, id)`, `tasks(run_id, id, status)`.
+- Add pruning jobs for old artifacts and large logs.
+
+## UX Basics
+- When adding model selection, surface `agent/listModels` and `agent/setDefaultModel` IPC.
+- Persist selection in a config file under `~/.local-agent/config.json`.

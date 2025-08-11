@@ -1,0 +1,146 @@
+"use client";
+import "./ai-theme.css";
+import { SchemeToggle } from "@/components/scheme-toggle";
+
+const Page = () => {
+  return (
+    <div
+      className="sticky top-0 z-10 flex items-center gap-2 bg-transparent py-4"
+      style={{
+        background:
+          "radial-gradient(1200px 600px at 10% -10%, rgba(var(--accent-1),0.10), transparent 60%), radial-gradient(1000px 800px at 110% 10%, rgba(var(--accent-2),0.09), transparent 60%), var(--bg-base)"
+      }}
+    >
+      {/* rest of code here */}
+      <div className="ml-auto">
+        <SchemeToggle />
+      </div>
+    </div>
+  );
+};
+
+export default Page;
+
+// components/app-sidebar.tsx
+const Sidebar = ({ children }) => {
+  return (
+    <div
+      className="md:z-40 z-40 border-r border-white/10 bg-[rgba(255,255,255,0.03)] text-white"
+    >
+      {/* rest of code here */}
+    </div>
+  );
+};
+
+export default Sidebar;
+
+// components/chat-message.tsx
+const ChatMessage = ({ message, isAI }) => {
+  const style = isAI
+    ? {
+        background: "linear-gradient(135deg, rgba(var(--accent-1),0.15), rgba(var(--accent-2),0.15))",
+        border: "1px solid rgba(255,255,255,0.1)",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.08), 0 12px 30px rgba(0,0,0,0.4)"
+      }
+    : {
+        background: "rgba(255,255,255,0.06)",
+        border: "1px solid rgba(255,255,255,0.08)",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06), 0 8px 24px rgba(0,0,0,0.35)"
+      };
+
+  return (
+    <div style={style}>
+      {/* rest of code here */}
+    </div>
+  );
+};
+
+export default ChatMessage;
+
+// components/chat-input.tsx
+const ChatInput = ({ onSend, listening }) => {
+  return (
+    <div>
+      <button
+        className={`h-9 rounded-xl border border-white/10 text-white shadow-[0_8px_24px_rgba(0,0,0,0.3)] transition hover:scale-[1.02] ${listening && "ring-2 [--ring:rgba(var(--accent-1),0.5)] ring-[color:var(--ring)]"}`}
+        style={{ background: "linear-gradient(135deg, rgba(var(--accent-1),0.35), rgba(var(--accent-2),0.35))" }}
+        onClick={onSend}
+      >
+        Send
+      </button>
+      <div
+        className="listening-mic"
+        style={{
+          inset: -6,
+          background: "radial-gradient(circle, rgba(var(--accent-1),0.16), transparent 60%)",
+          animation: "micPulse 1.8s ease-in-out infinite",
+        }}
+      >
+        {/* rest of code here */}
+      </div>
+    </div>
+  );
+};
+
+export default ChatInput;
+
+// components/agent-status-card.tsx
+const AgentStatusCard = ({ status }) => {
+  const color = {
+    Idle: "bg-white/30",
+    Listening: "bg-[rgb(var(--accent-1))]",
+    Thinking: "bg-[rgb(var(--accent-2))]",
+    Executing: "bg-amber-400"
+  }[status];
+
+  const haloStyle = {
+    background:
+      status === "Thinking"
+        ? "radial-gradient(circle, rgba(var(--accent-2),0.25), transparent 70%)"
+        : "radial-gradient(circle, rgba(var(--accent-1),0.25), transparent 70%)",
+    animation: "pulseGlow 1.8s ease-in-out infinite"
+  };
+
+  return (
+    <div className={color} style={haloStyle}>
+      {/* rest of code here */}
+    </div>
+  );
+};
+
+export default AgentStatusCard;
+
+// components/thinking-indicator.tsx
+const Dot = ({ isActive, delay }) => {
+  return (
+    <div
+      className="dot"
+      style={{
+        background: "radial-gradient(circle at 30% 30%, rgba(var(--accent-1),0.95), rgba(var(--accent-2),0.9))",
+        animation: "tdot 1.2s ease-in-out infinite",
+        animationDelay: `${delay}ms`,
+        boxShadow: "0 0 8px rgba(255,255,255,0.22)"
+      }}
+    >
+      {/* rest of code here */}
+    </div>
+  );
+};
+
+export default Dot;
+
+// app/ai-theme.css
+/* Gradient endpoints used across the UI */
+:root {
+  --accent-1: var(--accent-cyan);   /* left/primary endpoint */
+  --accent-2: var(--accent-violet); /* right/secondary endpoint (default: violet) */
+}
+/* Explicit schemes */
+[data-scheme="violet"] {
+  --accent-1: var(--accent-cyan);
+  --accent-2: var(--accent-violet);
+}
+[data-scheme="teal"] {
+  --accent-1: var(--accent-cyan);
+  --accent-2: var(--accent-teal);
+}

@@ -1,0 +1,11 @@
+---
+description: UI/UX rules aligning with tasks (model picker, settings, logs)
+globs: src/**/*.tsx
+---
+# UI/UX Rules
+
+- Keep sticky headers for app tabs and logs for constant visibility.
+- Chat input bar should be sticky at the bottom; Stop button must be a native `<button type="button">` and call `agent.cancelRun`.
+- File operation results should render action buttons (Open/Show) and never default to writing files unless explicitly requested.
+- Add model selector UI and persist selected model; default to LM Studio.
+- Keep components theme‑consistent with muted purple gradient.

@@ -1,0 +1,35 @@
+:root {
+  --bg-base: #0b0f14;
+
+  /* Source accent tuples (R,G,B) */
+  --accent-cyan: 0, 191, 255;
+  --accent-violet: 168, 85, 247;
+  --accent-teal: 20, 184, 166;
+  --accent-amber: 245, 158, 11;
+}
+
+/* Default scheme: Cyan ↔ Violet */
+:root {
+  --accent-1: 0, 191, 255;
+  --accent-2: 168, 85, 247;
+}
+
+/* Explicit schemes via data attribute */
+[data-scheme="violet"] {
+  --accent-1: 0, 191, 255;
+  --accent-2: 168, 85, 247;
+}
+
+[data-scheme="teal"] {
+  --accent-1: 0, 191, 255;
+  --accent-2: 20, 184, 166;
+}
+
+/* Glass effect utility */
+.glass {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 30px rgba(0, 0, 0, 0.45);
+}

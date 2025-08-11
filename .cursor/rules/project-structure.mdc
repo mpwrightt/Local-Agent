@@ -1,0 +1,21 @@
+---
+alwaysApply: true
+---
+# Project Structure Guide
+
+Use these anchors when navigating the codebase. Primary entry points:
+
+- App shell and UI: [src/App.tsx](mdc:src/App.tsx)
+- UI components: [src/components](mdc:src/components)
+- Agent runtime (Electron main) + IPC: [src/agent/runtime.ts](mdc:src/agent/runtime.ts)
+- Event streaming and DB: [src/db.ts](mdc:src/db.ts)
+- Orchestrator and scheduler: [src/agent/scheduler.ts](mdc:src/agent/scheduler.ts)
+- Task planner (turn text into tasks): [src/agent/task_planner.ts](mdc:src/agent/task_planner.ts)
+- Workers:
+  - File operations: [src/agent/workers/fileops.ts](mdc:src/agent/workers/fileops.ts)
+  - OCR (Vision/Tesseract): [src/agent/workers/ocr.ts](mdc:src/agent/workers/ocr.ts)
+  - Research: [src/agent/workers/research.ts](mdc:src/agent/workers/research.ts)
+  - Shell: [src/agent/workers/shell.ts](mdc:src/agent/workers/shell.ts)
+- Electron bootstrap: [electron/main.ts](mdc:electron/main.ts), [electron/preload.ts](mdc:electron/preload.ts)
+
+Backlog reference for ongoing work: [tasks.md](mdc:tasks.md)

@@ -1,0 +1,12 @@
+---
+description: Worker development standards for Phase 2/3/4
+globs: src/agent/workers/*.ts
+---
+# Worker Development Standards
+
+- Put all new workers under `src/agent/workers/` with a single exported `spawn<Worker>Name(ctx)` entry.
+- Accept `{ runId, sessionId, task, signal? }` and propagate `AbortSignal` to subprocesses.
+- Emit events via `db.addRunEvent(runId, { type, taskId: task.id, ... })` with clear messages.
+- Respect budgets/timeouts defined on tasks and report overages.
+- For filesystem/network actions, check permission grants (to be provided by the registry/permission layer).
+- Write unit tests for parsers/command building; mock side‑effects where feasible.
