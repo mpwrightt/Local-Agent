@@ -16,12 +16,15 @@ export default async function handler(req: any, res: any) {
   const qs = req.url && req.url.includes('?') ? '?' + req.url.split('?').slice(1).join('?') : ''
   const target = `${base.replace(/\/$/, '')}/${rawPath}${qs}`
 
-  // Copy headers but drop host
+  // Copy headers but drop host. Optionally inject default Authorization from env.
   const headers: Record<string, string> = {}
   for (const [k, v] of Object.entries(req.headers || {})) {
     if (!v) continue
     if (k.toLowerCase() === 'host') continue
     headers[k] = Array.isArray(v) ? v.join(', ') : String(v)
+  }
+  if (!headers['authorization'] && process.env.LM_PROXY_AUTH) {
+    headers['authorization'] = process.env.LM_PROXY_AUTH
   }
   // Ensure JSON content type if the body is an object
   const method = req.method || 'GET'

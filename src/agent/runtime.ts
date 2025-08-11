@@ -5,26 +5,40 @@ import { registerBuiltInWorkers, loadPlugins, watchPlugins } from './registry'
 // import { logger } from '../shared/logger'
 // import { eventBus } from './event_bus'
 import { resolveConfirmation } from './confirm'
-import OpenAI from 'openai'
+// Use fetch-based LM Studio client to avoid openai package in web/electron builds
+type ChatMessage = { role: 'user' | 'assistant' | 'system'; content: string }
+class LMClient {
+  constructor(private baseURL: string) {}
+  async listModels(): Promise<string[]> {
+    const r = await fetch(this.baseURL.replace(/\/$/, '') + '/models')
+    const j: any = await r.json()
+    return Array.isArray(j?.data) ? j.data.map((m: any) => m.id) : []
+  }
+  async chat(messages: ChatMessage[], model: string, opts?: { temperature?: number; stream?: boolean }) {
+    const r = await fetch(this.baseURL.replace(/\/$/, '') + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages, temperature: opts?.temperature ?? 0.7, stream: Boolean(opts?.stream) })
+    })
+    return r
+  }
+}
 import { getDefaultModel, setDefaultModel, getRetentionDays } from './config'
 import { db } from '../db'
 import { quickSearch, fetchReadable, type QuickResult } from './web'
 
 export function createAgentRuntime(ipcMain: IpcMain) {
-  async function detectChatIntent(client: OpenAI, modelName: string, text: string): Promise<{ action: string; query?: string; url?: string }> {
+  async function detectChatIntent(_client: any, _modelName: string, text: string): Promise<{ action: string; query?: string; url?: string }> {
     try {
       const sys = 'You are an intent router. Return strict JSON only with fields: {"action": "answer|quick_web|open_url|summarize_url|to_tasks|to_research", "query?": string, "url?": string}. Choose quick_web for lightweight web lookup; to_research only if the user explicitly requests deep research.'
-      const res = await client.chat.completions.create({
-        model: modelName,
-        messages: [
-          { role: 'system', content: sys },
-          { role: 'user', content: text }
-        ],
-        temperature: 0,
-        max_tokens: 120,
-        response_format: { type: 'json_object' }
-      })
-      const content = res.choices[0]?.message?.content ?? '{}'
+      const baseURL = process.env.LMSTUDIO_HOST ?? 'http://127.0.0.1:1234/v1'
+      const client = new LMClient(baseURL)
+      const r = await client.chat([
+        { role: 'system', content: sys },
+        { role: 'user', content: text }
+      ], _modelName, { temperature: 0 })
+      const j: any = await r.json()
+      const content = j?.choices?.[0]?.message?.content ?? '{}'
       const parsed = JSON.parse(content)
       if (typeof parsed?.action === 'string') return parsed
     } catch {}
@@ -129,20 +143,16 @@ export function createAgentRuntime(ipcMain: IpcMain) {
     try {
       // LM Studio OpenAI-compatible API configuration
       const baseURL = process.env.LMSTUDIO_HOST ?? 'http://127.0.0.1:1234/v1'
-      const client = new OpenAI({
-        baseURL,
-        apiKey: 'not-needed' // LM Studio doesn't require API key
-      })
+      const client = new LMClient(baseURL)
 
       // Get available models from LM Studio
       let modelName = input.model ?? 'gpt-oss:20b'
       if (!input.model) {
         try {
-          const models = await client.models.list()
-          // Prefer gpt-oss models, then any available model
-          modelName = models.data.find(m => m.id.includes('gpt-oss'))?.id 
-                   ?? models.data.find(m => m.id.includes('custom-test'))?.id
-                   ?? models.data[0]?.id 
+          const models = await client.listModels()
+          modelName = models.find(m => m.includes('gpt-oss'))
+                   ?? models.find(m => m.includes('custom-test'))
+                   ?? models[0]
                    ?? 'gpt-oss:20b'
         } catch {
           modelName = 'gpt-oss:20b' // fallback to known working model
@@ -199,6 +209,41 @@ export function createAgentRuntime(ipcMain: IpcMain) {
       if (systemIdx >= 0) guardedMessages[systemIdx] = { role: 'system', content: guardedMessages[systemIdx].content + `\n${reasoningHint}` }
 
       // Stream tokens so we can emit a dynamic thinking box when model uses analysis/commentary
+<<<<<<< HEAD
+      const resp = await client.chat(guardedMessages as any, modelName, { temperature: input.temperature ?? (rl === 'high' ? 0.2 : rl === 'low' ? 0.8 : 0.6), stream: false })
+      const jj: any = await resp.json()
+      const contentAll: string = jj?.choices?.[0]?.message?.content ?? ''
+      let analysisBuf = contentAll
+      let finalBuf = ''
+      // Fallback if model streamed only one buffer
+      const text = (finalBuf || analysisBuf)
+      const extract = (() => {
+        try {
+          const tagFinal = text.match(/<final>([\s\S]*?)<\/final>/i)
+          if (tagFinal?.[1]) return { content: tagFinal[1].trim(), thinking: analysisBuf.replace(/<final>[\s\S]*$/i, '').trim() }
+          const tokIdx = text.indexOf('<|final|>')
+          if (tokIdx >= 0) {
+            const rest = text.slice(tokIdx + '<|final|>'.length)
+            const next = rest.search(/<\|[a-z]+\|>/i)
+            const content = (next >= 0 ? rest.slice(0, next) : rest).trim()
+            const think = analysisBuf.slice(0, tokIdx).trim()
+            return { content, thinking: think }
+          }
+        } catch {}
+        return { content: text.trim(), thinking: '' }
+      })()
+
+      // Sanitize visible content
+      let cleaned = extract.content
+      cleaned = cleaned.replace(/<\|[^>]+\|>/g, '')
+      cleaned = cleaned.replace(/^\s*commentary\s+to=[^\n]*$/gim, '')
+      cleaned = cleaned.replace(/^\s*code\s*\{[\s\S]*$/gim, '')
+
+      return {
+        success: true,
+        content: cleaned,
+        model: modelName,
+=======
       const response = await client.chat.completions.create({
         model: modelName,
         messages: guardedMessages,
@@ -249,6 +294,7 @@ export function createAgentRuntime(ipcMain: IpcMain) {
         success: true,
         content: cleaned,
         model: modelName,
+>>>>>>> origin/main
         links: quickHits?.slice(0, 3),
         thinking: showThinking ? extract.thinking : ''
       }
