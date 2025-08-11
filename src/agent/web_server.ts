@@ -99,9 +99,15 @@ export function startAgentServer(opts: ServerOptions = {}) {
   server.listen(port, host, () => {
     // eslint-disable-next-line no-console
     console.log(`[agent] listening on http://${host}:${port}`)
+    console.log(`[agent] token: ${token}`)
   })
 
   return { server, token }
+}
+
+// Allow running file directly: `node src/agent/web_server.ts` with ts-node loader
+if (import.meta.url === url.pathToFileURL(process.argv[1]).href) {
+  startAgentServer()
 }
 
 
