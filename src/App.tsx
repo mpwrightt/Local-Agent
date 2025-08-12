@@ -37,9 +37,9 @@ export default function App() {
   const [searchEnabled, setSearchEnabled] = useState<boolean>(true)
   const [showThinking, setShowThinking] = useState<boolean>(true)
   const [activeTab, setActiveTab] = useState<'chat' | 'logs'>('chat')
-  const [remoteMode, setRemoteMode] = useState<boolean>(false)
-  const [remoteBase, setRemoteBase] = useState<string>('')
-  const [remoteToken, setRemoteToken] = useState<string>('')
+  const [remoteMode] = useState<boolean>(false)
+  const [remoteBase] = useState<string>('')
+  const [remoteToken] = useState<string>('')
   const [logs, setLogs] = useState<Array<ReturnType<typeof eventToLogEntry>>>([])
   const [currentRunId, setCurrentRunId] = useState<string | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([
