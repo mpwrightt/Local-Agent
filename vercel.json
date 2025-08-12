@@ -1,7 +1,8 @@
 {
   "version": 2,
   "env": {
-    "LM_PROXY_BASE": "https://effects-stuff-pages-bikini.trycloudflare.com"
+    "LM_PROXY_BASE": "https://effects-stuff-pages-bikini.trycloudflare.com",
+    "VITE_LMSTUDIO_HOST": "https://effects-stuff-pages-bikini.trycloudflare.com/v1"
   },
   "builds": [
     { "src": "package.json", "use": "@vercel/static-build", "config": { "distDir": "dist" } },
