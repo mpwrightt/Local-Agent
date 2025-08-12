@@ -36,9 +36,10 @@ export async function quickSearch(query: string, count: number = 3): Promise<Qui
         return results.slice(0, count).map((r: any) => ({ title: (r?.title ?? '').toString() || r?.url || 'Result', url: (r?.url ?? '').toString(), snippet: (r?.content ?? '').toString().slice(0, 200) }))
       }
     }
-    // Fallback: DuckDuckGo HTML endpoint parsing
+    // Fallback: DuckDuckGo HTML endpoint parsing via CORS-friendly proxy
     const url = 'https://duckduckgo.com/html/?kz=1&q=' + encodeURIComponent(query)
-    const resp = await doFetch(url)
+    const proxied = 'https://r.jina.ai/http/' + encodeURIComponent(url)
+    const resp = await doFetch(proxied)
     const html = await resp.text()
     const results: QuickResult[] = []
     const re = /<a[^>]+class="result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gim

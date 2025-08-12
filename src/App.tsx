@@ -290,6 +290,7 @@ export default function App() {
             .map(m => ({ role: m.role === 'ai' ? 'assistant' as const : 'user' as const, content: m.content || '' }))
           chatHistory.push({ role: 'user' as const, content: text })
           // Use Vite proxy in dev/preview to bypass CORS: /lm maps to 127.0.0.1:1234
+          // In browser prod/dev, use the Vercel/Vite proxy at /lm; allow override via VITE_LMSTUDIO_HOST
           const baseURL = (import.meta as any)?.env?.VITE_LMSTUDIO_HOST || '/lm/v1'
           const temperature = reasoningLevel === 'high' ? 0.9 : reasoningLevel === 'low' ? 0.3 : 0.7
           const resp = await fetch(baseURL.replace(/\/$/, '') + '/chat/completions', {
@@ -324,7 +325,7 @@ export default function App() {
             .slice(-10)
             .map(m => ({ role: m.role === 'ai' ? 'assistant' as const : 'user' as const, content: m.content || '' }))
           history.push({ role: 'user' as const, content: text })
-          const resp = await fetch('/lm/v1/chat/completions', {
+          const resp = await fetch(((import.meta as any)?.env?.VITE_LMSTUDIO_HOST || '/lm/v1').replace(/\/$/, '') + '/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: modelName, messages: history })
