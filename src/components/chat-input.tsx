@@ -142,19 +142,18 @@ export function ChatInput({
             "w-full resize-none bg-transparent px-2 py-2 text-sm text-white/90 outline-none placeholder:text-white/40",
           )}
         />
-        {/* Compact slash suggestions (floating, non-intrusive) */}
-        {value.startsWith('/') && (
-          <div className="absolute left-2 bottom-12 z-20 w-[min(360px,calc(100%-16px))] rounded-lg border border-white/10 bg-[oklch(var(--background))]/95 p-2 text-xs text-white/80 shadow-xl backdrop-blur supports-[backdrop-filter]:bg-white/10">
-            <div className="grid gap-1">
-              {listSlashCommands(value).slice(0,4).map(cmd => (
-                <div key={cmd.id} className="flex items-start gap-2 px-1 py-1 rounded-md hover:bg-white/5">
-                  <div>
-                    <div className="font-medium text-white/90">/{cmd.label}</div>
-                    {cmd.description && <div className="text-white/60 line-clamp-1 max-w-[320px]">{cmd.description}</div>}
-                  </div>
-                </div>
-              ))}
-            </div>
+        {/* Minimal slash suggestions: tiny chip row, only after some query text */}
+        {value.startsWith('/') && value.replace(/^\//, '').trim().length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {listSlashCommands(value).slice(0,6).map(cmd => (
+              <div
+                key={cmd.id}
+                className="px-2 py-1 rounded-full border border-white/10 bg-white/5 text-[11px] text-white/80"
+                title={cmd.description || `/${cmd.label}`}
+              >
+                /{cmd.label}
+              </div>
+            ))}
           </div>
         )}
         <div className="flex items-center justify-between px-1 pb-1">
