@@ -179,6 +179,55 @@ export async function spawnFileOpsAgent(ctx: Ctx) {
       })
       return { query: listType ? `${listType} on ${scope}` : name, results: candidates, searchType: listType ? 'listing' : 'filename' }
     }
+    // Create directory
+    if (parsed?.op === 'mkdir' && typeof parsed.name === 'string') {
+      const home = os.homedir()
+      const scopes: Record<string, string> = {
+        desktop: path.join(home, 'Desktop'),
+        documents: path.join(home, 'Documents'),
+        downloads: path.join(home, 'Downloads'),
+        pictures: path.join(home, 'Pictures'),
+      }
+      const scope: string = (parsed.scope || 'documents').toLowerCase()
+      const base = scopes[scope] || path.join(home, 'Documents')
+      const target = path.isAbsolute(parsed.name) ? parsed.name : path.join(base, parsed.name)
+      try { fs.mkdirSync(target, { recursive: true }) } catch {}
+      db.addRunEvent(ctx.runId, { type: 'file_created', taskId: ctx.task.id, path: target })
+      return { path: target, created: true }
+    }
+    // Move file/folder
+    if (parsed?.op === 'move' && typeof parsed.src === 'string' && typeof parsed.dest === 'string') {
+      const expand = (p: string) => p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p
+      const src = expand(parsed.src)
+      const destRaw = expand(parsed.dest)
+      const dest = path.isAbsolute(destRaw) ? destRaw : path.join(path.dirname(src), destRaw)
+      fs.renameSync(src, dest)
+      db.addRunEvent(ctx.runId, { type: 'file_moved', taskId: ctx.task.id, src, dest })
+      return { src, dest }
+    }
+    // Copy file/folder
+    if (parsed?.op === 'copy' && typeof parsed.src === 'string' && typeof parsed.dest === 'string') {
+      const expand = (p: string) => p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p
+      const src = expand(parsed.src)
+      const destRaw = expand(parsed.dest)
+      const dest = path.isAbsolute(destRaw) ? destRaw : path.join(path.dirname(src), destRaw)
+      const stat = fs.statSync(src)
+      if (stat.isDirectory()) {
+        // Shallow copy directory
+        fs.mkdirSync(dest, { recursive: true })
+        const entries = fs.readdirSync(src, { withFileTypes: true })
+        for (const it of entries) {
+          if (it.isFile()) {
+            fs.copyFileSync(path.join(src, it.name), path.join(dest, it.name))
+          }
+        }
+      } else {
+        fs.mkdirSync(path.dirname(dest), { recursive: true })
+        fs.copyFileSync(src, dest)
+      }
+      db.addRunEvent(ctx.runId, { type: 'file_copied', taskId: ctx.task.id, src, dest })
+      return { src, dest }
+    }
     if (parsed?.op === 'rename' && typeof parsed.src === 'string' && typeof parsed.dest === 'string') {
       function expandHome(p: string) {
         return p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p

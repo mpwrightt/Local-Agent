@@ -54,6 +54,7 @@ export default function App() {
   // Guards to avoid duplicate research UI per run/task
   const renderedResearchUIRef = useRef<Set<string>>(new Set()) // keys: runId
   const renderedResearchJSONRef = useRef<Set<string>>(new Set()) // keys: runId
+  const pendingDMRef = useRef<{ to: string; message?: string } | null>(null)
 
   const agentAny = (!remoteMode && typeof window !== 'undefined'
     ? (window as unknown as { agent?: {
@@ -168,6 +169,14 @@ export default function App() {
       if (p.type === 'run_complete') {
         setStatus('Idle')
         setCurrentRunId(null)
+        // Show a concise completion message in chat
+        appendMessage({ id: `done:${Date.now()}`, role: 'ai', type: 'text', content: 'Task complete.' })
+        // Fallback: if DM confirmation did not arrive from worker, synthesize the card
+        const pending = pendingDMRef.current
+        if (pending) {
+          appendMessage({ id: `dm:${Date.now()}`, role: 'ai', type: 'dm_confirm', content: '', dm: { to: pending.to, message: pending.message, at: new Date().toISOString() } as any })
+          pendingDMRef.current = null
+        }
       }
       if (p.type === 'run_cancelled') {
         setStatus('Idle')
@@ -190,6 +199,16 @@ export default function App() {
             appendMessage({ id: `ai:${createdAt ?? Date.now()}`, role: 'ai', type: 'text', content: trimmed })
           }
         }
+      } else if ((p as any)?.type === 'dm_sent') {
+        const to = (p as any)?.to || 'recipient'
+        const msg = (p as any)?.message || ''
+        appendMessage({ id: `ai:${createdAt ?? Date.now()}`, role: 'ai', type: 'dm_confirm', content: '', dm: { to, message: msg, at: new Date().toISOString() } as any })
+        pendingDMRef.current = null
+      } else if ((p as any)?.type === 'dm_hint') {
+        // Pre-store hint; actual confirmation may arrive later
+        const to = (p as any)?.to || ''
+        const msg = (p as any)?.message || ''
+        pendingDMRef.current = { to, message: msg }
       } else if (p.type === 'ocr_response') {
         // Direct OCR response for uploaded images
         const payload = p as any
@@ -260,11 +279,31 @@ export default function App() {
   }, [hasAgent, agentAny, activeId])
 
   async function handleSend(text: string, options?: { mode?: AgentMode }) {
+    // Pretty-print slash/JSON commands for the chat view
+    let displayText = text
+    try {
+      const j = JSON.parse(text)
+      if (j && typeof j === 'object') {
+        const anyJ: any = j
+        if (anyJ.meta?.kind === 'slack_dm') {
+          const to = String(anyJ.meta.to || '').trim()
+          const msg = String(anyJ.meta.message || '').trim()
+          displayText = `Slack DM → ${to}${msg ? `: ${msg}` : ''}`
+        } else if (anyJ.op === 'shell' && typeof anyJ.cmd === 'string') {
+          const m = anyJ.cmd.match(/open\s+-a\s+"([^"]+)"/i)
+          displayText = m?.[1] ? `Open ${m[1]}` : `Run shell: ${anyJ.cmd}`
+        } else if (anyJ.op === 'locate') {
+          const name = anyJ.name || '*'
+          const scope = anyJ.scope || 'any'
+          displayText = `Locate ${name} on ${scope}`
+        }
+      }
+    } catch {}
     const userMsg: V0ChatMessage = {
       id: `user:${Date.now()}`,
       role: 'user' as const,
       type: uploadedImage ? 'image' as const : 'text' as const,
-      content: text,
+      content: displayText,
       ...(uploadedImage && {
         image: {
           src: uploadedImage.dataUrl,

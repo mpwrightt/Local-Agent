@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Paperclip, Mic, MicOff, SendHorizontal, Search, MessageCircle, Zap, Square, X, Wand2, SlidersHorizontal } from "lucide-react"
+import { listSlashCommands, runSlashCommand } from "@/lib/commands"
+import { CommandBuilder } from './command-builder'
 import { cn } from "@/lib/utils"
 
 export type AgentMode = "chat" | "tasks" | "research"
@@ -69,8 +71,18 @@ export function ChatInput({
   }
 
   function handleSend() {
-    if (!value.trim()) return
-    onSend?.(value.trim(), { mode: agentMode })
+    const text = value.trim()
+    if (!text) return
+    // Slash command handling
+    if (text.startsWith('/')) {
+      const res = runSlashCommand(text)
+      if (res.ok) {
+        onSend?.(res.output, { mode: res.forceMode ?? agentMode })
+        setValue("")
+        return
+      }
+    }
+    onSend?.(text, { mode: agentMode })
     setValue("")
   }
 
@@ -130,6 +142,26 @@ export function ChatInput({
             "w-full resize-none bg-transparent px-2 py-2 text-sm text-white/90 outline-none placeholder:text-white/40",
           )}
         />
+        {/* Inline slash suggestions */}
+        {value.startsWith('/') && (
+          <div className="mt-2 rounded-lg border border-white/10 bg-[oklch(var(--background))]/90 p-2 text-xs text-white/80">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-white/50">Commands</div>
+            <div className="grid gap-1">
+              {listSlashCommands(value).slice(0,7).map(cmd => (
+                <div key={cmd.id} className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="font-medium">/{cmd.label}</div>
+                    {cmd.description && <div className="text-white/60">{cmd.description}</div>}
+                    {cmd.usage && <div className="text-white/40">Usage: {cmd.usage}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 text-white/50">
+              Tip: Use <span className="text-white/80">/open</span> to launch apps, <span className="text-white/80">/locate</span> to find files, <span className="text-white/80">/rename</span> to rename, and <span className="text-white/80">/ocr</span> to search images. Press Enter to run.
+            </div>
+          </div>
+        )}
         <div className="flex items-center justify-between px-1 pb-1">
           <div className="text-[10px] text-white/40">Enter to send · Shift+Enter for newline</div>
           <div className="flex items-center gap-2">
@@ -191,6 +223,9 @@ export function ChatInput({
               </TooltipTrigger>
               <TooltipContent>{listening ? 'Stop voice input' : 'Start voice input'}</TooltipContent>
             </Tooltip>
+
+            {/* Command Builder */}
+            <CommandBuilder onInsert={(text) => setValue(text)} />
 
             {/* Settings popover */}
             <Popover>

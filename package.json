@@ -12,7 +12,9 @@
     "preview": "vite preview",
     "start:prod": "cross-env NODE_ENV=production electron dist-electron/main.cjs",
     "agent:serve": "tsx src/agent/web_server.ts",
-    "tunnel": "node scripts/tunnel.mjs"
+    "tunnel": "node scripts/tunnel.mjs",
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "postinstall": "electron-rebuild -f -w better-sqlite3"
   },
   "dependencies": {
     "@langchain/core": "^0.3.26",

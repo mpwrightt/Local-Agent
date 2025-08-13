@@ -10,27 +10,31 @@ interface Ctx {
   automation?: boolean
 }
 
-function parseCommandFromDescription(desc: string): string | null {
+type ParsedShell = { cmd: string; meta?: any }
+
+function parseCommandFromDescription(desc: string): ParsedShell | null {
   try {
     const j = JSON.parse(desc)
-    if (j && typeof j.cmd === 'string') return j.cmd
+    if (j && typeof j.cmd === 'string') return { cmd: j.cmd, meta: (j as any).meta }
   } catch {}
   const m = desc.match(/^(?:shell:|run:|execute:)\s*(.+)$/i)
-  if (m && m[1]) return m[1].trim()
+  if (m && m[1]) return { cmd: m[1].trim() }
   return null
 }
 
 function isWhitelisted(cmd: string): boolean {
   const first = cmd.trim().split(/\s+/)[0]
-  const whitelist = new Set(['git', 'ls', 'cat', 'echo', 'pwd'])
+  const whitelist = new Set(['git', 'ls', 'cat', 'echo', 'pwd', 'open', 'osascript', 'killall'])
   return whitelist.has(first)
 }
 
 export async function spawnShellAgent(ctx: Ctx) {
-  const cmd = parseCommandFromDescription(ctx.task.description)
-  if (!cmd) {
+  const parsed = parseCommandFromDescription(ctx.task.description)
+  if (!parsed) {
     throw new Error('No shell command provided')
   }
+  const cmd = parsed.cmd
+  const meta = parsed.meta
   const whitelisted = isWhitelisted(cmd)
   if (!whitelisted && !ctx.automation) {
     // Ask user for confirmation before running non-whitelisted commands
@@ -40,6 +44,10 @@ export async function spawnShellAgent(ctx: Ctx) {
   }
 
   db.addRunEvent(ctx.runId, { type: 'shell_start', taskId: ctx.task.id, cmd })
+  // For DM flows, store a lightweight hint so UI can synthesize a card if worker confirmation is missed
+  if (meta && meta.kind === 'slack_dm') {
+    db.addRunEvent(ctx.runId, { type: 'dm_hint', taskId: ctx.task.id, to: meta.to, message: meta.message })
+  }
   const shellBin = process.env.SHELL || '/bin/zsh'
   const home = os.homedir()
 
@@ -64,6 +72,10 @@ export async function spawnShellAgent(ctx: Ctx) {
     child.on('close', (code) => {
       const exitCode = typeof code === 'number' ? code : -1
       db.addRunEvent(ctx.runId, { type: 'shell_end', taskId: ctx.task.id, exitCode })
+      // Emit friendly domain events for known automations
+      if (exitCode === 0 && meta && meta.kind === 'slack_dm') {
+        db.addRunEvent(ctx.runId, { type: 'dm_sent', taskId: ctx.task.id, to: meta.to, message: meta.message })
+      }
       resolve({ exitCode, stdout: out, stderr: err })
     })
   })

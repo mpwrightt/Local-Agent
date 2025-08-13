@@ -1,5 +1,8 @@
 import OpenAI from 'openai'
 import { z } from 'zod'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
 
 const TaskSchema = z.object({
   id: z.string(),
@@ -174,6 +177,216 @@ function detectOpenTask(prompt: string): PlannedTask[] | null {
   return null
 }
 
+// Detect requests to open applications on macOS (e.g., "open slack", "launch chrome")
+function detectAppOpenTask(prompt: string): PlannedTask[] | null {
+  const p = prompt.trim()
+  // Broad pattern: open/launch/start (the) [app/application/program] <name> (app)
+  const m = p.match(/\b(?:open|launch|start)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i)
+  if (!m || !m[1]) return null
+  let raw = m[1].trim()
+  // Trim trailing courtesy phrases
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, '').trim()
+  if (!raw) return null
+  // Canonicalize common app names
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw)
+  const cmd = `open -a "${canonical}"`
+  return [
+    { id: 'open_app', title: `Open ${canonical}`, description: JSON.stringify({ cmd }), role: 'shell', deps: [], budgets: {} },
+  ]
+}
+
+// Detect requests to quit/close applications on macOS (e.g., "quit chrome", "close Slack")
+function detectAppQuitTask(prompt: string): PlannedTask[] | null {
+  const p = prompt.trim()
+  const m = p.match(/\b(?:quit|close|exit|kill)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i)
+  if (!m || !m[1]) return null
+  let raw = m[1].trim()
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, '').trim()
+  if (!raw) return null
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw)
+  // Prefer AppleScript quit for a graceful shutdown
+  const cmd = `osascript -e 'tell application "${canonical}" to quit'`
+  return [
+    { id: 'quit_app', title: `Quit ${canonical}`, description: JSON.stringify({ cmd }), role: 'shell', deps: [], budgets: {} },
+  ]
+}
+
+// Bring app to front / focus / show
+function detectAppFocusTask(prompt: string): PlannedTask[] | null {
+  const p = prompt.trim()
+  const m = p.match(/\b(?:focus|switch\s+to|bring\s+(?:it|app|application)?\s*to\s+front|show)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i)
+  if (!m || !m[1]) return null
+  let raw = m[1].trim()
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, '').trim()
+  if (!raw) return null
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw)
+  const cmd = `osascript -e 'tell application "${canonical}" to activate'`
+  return [ { id: 'focus_app', title: `Focus ${canonical}`, description: JSON.stringify({ cmd }), role: 'shell', deps: [], budgets: {} } ]
+}
+
+// Hide application windows
+function detectAppHideTask(prompt: string): PlannedTask[] | null {
+  const p = prompt.trim()
+  const m = p.match(/\b(?:hide|minimise|minimize)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i)
+  if (!m || !m[1]) return null
+  let raw = m[1].trim()
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, '').trim()
+  if (!raw) return null
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw)
+  const cmd = `osascript -e 'tell application "${canonical}" to hide'`
+  return [ { id: 'hide_app', title: `Hide ${canonical}`, description: JSON.stringify({ cmd }), role: 'shell', deps: [], budgets: {} } ]
+}
+
+// Restart/relaunch app: quit then reopen
+function detectAppRestartTask(prompt: string): PlannedTask[] | null {
+  const p = prompt.trim()
+  const m = p.match(/\b(?:restart|relaunch|reopen)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i)
+  if (!m || !m[1]) return null
+  let raw = m[1].trim()
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, '').trim()
+  if (!raw) return null
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw)
+  const quitCmd = `osascript -e 'tell application "${canonical}" to quit'`
+  const openCmd = `open -a "${canonical}"`
+  return [
+    { id: 'quit_app', title: `Quit ${canonical}`, description: JSON.stringify({ cmd: quitCmd }), role: 'shell', deps: [], budgets: {} },
+    { id: 'open_app', title: `Open ${canonical}`, description: JSON.stringify({ cmd: openCmd }), role: 'shell', deps: ['quit_app'], budgets: {} },
+  ]
+}
+
+function canonicalizeAppName(name: string): string {
+  const n = name.trim()
+  const lower = n.toLowerCase()
+  const map: Record<string, string> = {
+    'slack': 'Slack',
+    'chrome': 'Google Chrome',
+    'google chrome': 'Google Chrome',
+    'safari': 'Safari',
+    'finder': 'Finder',
+    'terminal': 'Terminal',
+    'iterm': 'iTerm',
+    'iterm2': 'iTerm',
+    'vscode': 'Visual Studio Code',
+    'vs code': 'Visual Studio Code',
+    'code': 'Visual Studio Code',
+    'xcode': 'Xcode',
+    'notes': 'Notes',
+    'messages': 'Messages',
+    'mail': 'Mail',
+    'outlook': 'Microsoft Outlook',
+    'ms outlook': 'Microsoft Outlook',
+    'microsoft outlook': 'Microsoft Outlook',
+    'preview': 'Preview',
+    'calendar': 'Calendar',
+    'reminders': 'Reminders',
+    'spotify': 'Spotify',
+    'discord': 'Discord',
+    'zoom': 'zoom.us',
+    'system preferences': 'System Settings',
+    'settings': 'System Settings',
+  }
+  if (map[lower]) return map[lower]
+  // If user includes .app or capitalization already, respect it; otherwise Title Case and append .app only if provided later by the OS
+  const titleCase = n.replace(/\b\w+/g, (w) => w.charAt(0).toUpperCase() + w.slice(1))
+  return titleCase
+}
+
+// Lightweight fuzzy correction and installed-app resolution
+function resolveAppName(input: string): string | null {
+  const normalizedInput = normalizeAppName(input)
+  const candidates = new Set<string>()
+  // Known popular apps
+  for (const a of KNOWN_APPS) candidates.add(a)
+  // Discovered installed apps
+  for (const a of getInstalledApps()) candidates.add(a)
+  const normInput = normalizeForCompare(normalizedInput)
+  // Strong contains preference (e.g., outlook in Microsoft Outlook)
+  for (const cand of candidates) {
+    const normCand = normalizeForCompare(cand)
+    if (normCand.includes(normInput) || normInput.includes(normCand)) {
+      return cand
+    }
+  }
+  let best: { name: string; score: number } | null = null
+  for (const cand of candidates) {
+    const normCand = normalizeForCompare(cand)
+    if (normCand === normInput) return cand
+    // Require same starting letter for fuzzy fallback to avoid mismaps like outlook -> Font Book
+    if (normCand[0] !== normInput[0]) continue
+    const score = similarity(normInput, normCand)
+    if (!best || score > best.score) best = { name: cand, score }
+  }
+  if (best && best.score >= 0.75) return best.name
+  return null
+}
+
+const KNOWN_APPS: string[] = [
+  'Slack', 'Google Chrome', 'Visual Studio Code', 'Safari', 'Finder', 'Terminal', 'iTerm', 'Xcode',
+  'Notes', 'Messages', 'Mail', 'Preview', 'Calendar', 'Reminders', 'Spotify', 'Discord', 'zoom.us', 'Zoom',
+  'System Settings', 'Microsoft Outlook', 'Arc', 'Firefox', 'Notion', 'Obsidian', 'Postman', 'TablePlus', 'Docker',
+  'WhatsApp', 'Telegram', 'Signal', '1Password', 'Raycast', 'Figma', 'Microsoft Word', 'Microsoft Excel',
+  'Microsoft PowerPoint'
+]
+
+let installedAppsCache: string[] | null = null
+function getInstalledApps(): string[] {
+  if (installedAppsCache) return installedAppsCache
+  const roots = [
+    '/Applications',
+    '/System/Applications',
+    path.join(os.homedir(), 'Applications'),
+    '/Applications/Utilities'
+  ]
+  const seen = new Set<string>()
+  for (const root of roots) {
+    try {
+      const entries = fs.readdirSync(root, { withFileTypes: true })
+      for (const ent of entries) {
+        if (ent.isDirectory() && ent.name.endsWith('.app')) {
+          const base = ent.name.replace(/\.app$/i, '')
+          if (!seen.has(base)) seen.add(base)
+        }
+      }
+    } catch {}
+  }
+  installedAppsCache = Array.from(seen)
+  return installedAppsCache
+}
+
+function normalizeAppName(s: string): string {
+  return s.replace(/\.app$/i, '').trim()
+}
+
+function normalizeForCompare(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+function similarity(a: string, b: string): number {
+  if (!a || !b) return 0
+  const dist = levenshtein(a, b)
+  const denom = Math.max(a.length, b.length)
+  return denom === 0 ? 0 : 1 - dist / denom
+}
+
+function levenshtein(a: string, b: string): number {
+  const m = a.length
+  const n = b.length
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0))
+  for (let i = 0; i <= m; i++) dp[i][0] = i
+  for (let j = 0; j <= n; j++) dp[0][j] = j
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      )
+    }
+  }
+  return dp[m][n]
+}
+
 // Simple deterministic detection for local file rename requests
 function detectRenameTask(prompt: string): PlannedTask[] | null {
   const p = prompt.trim()
@@ -206,6 +419,37 @@ function detectRenameTask(prompt: string): PlannedTask[] | null {
 }
 
 export async function planTasks(prompt: string, modelOverride?: string, deep?: boolean, automation?: boolean): Promise<PlannedTask[]> {
+  // Early: JSON override for explicit ops to avoid regex mis-detection
+  try {
+    const j = JSON.parse(prompt)
+    if (j && typeof j === 'object') {
+      if (j.op === 'shell' && typeof j.cmd === 'string') {
+        // Preserve meta (e.g., slack_dm) so worker can emit a rich confirmation event
+        return [ { id: 'sh1', title: 'Run shell command', description: JSON.stringify({ cmd: j.cmd, meta: j.meta }), role: 'shell', deps: [], budgets: {} } ]
+      }
+      if (j.op === 'open' && typeof j.name === 'string') {
+        return [ { id: 'open', title: `Open ${j.name}`, description: JSON.stringify(j), role: 'fileops', deps: [], budgets: {} } ]
+      }
+      if (j.op === 'rename' && typeof j.src === 'string' && typeof j.dest === 'string') {
+        return [ { id: 'rename', title: 'Rename file', description: JSON.stringify(j), role: 'fileops', deps: [], budgets: {} } ]
+      }
+      if (j.op === 'locate' && typeof j.name === 'string') {
+        return [ { id: 'locate', title: 'Locate', description: JSON.stringify(j), role: 'fileops', deps: [], budgets: {} } ]
+      }
+      if (j.op === 'ocr_search' && (typeof j.text === 'string' || j.text === '*')) {
+        return [ { id: 'ocr', title: 'OCR search', description: JSON.stringify(j), role: 'fileops', deps: [], budgets: {} } ]
+      }
+      if (j.op === 'mkdir' && typeof j.name === 'string') {
+        return [ { id: 'mkdir', title: `Create folder ${j.name}`, description: JSON.stringify(j), role: 'fileops', deps: [], budgets: {} } ]
+      }
+      if (j.op === 'move' && typeof j.src === 'string' && typeof j.dest === 'string') {
+        return [ { id: 'move', title: 'Move item', description: JSON.stringify(j), role: 'fileops', deps: [], budgets: {} } ]
+      }
+      if (j.op === 'copy' && typeof j.src === 'string' && typeof j.dest === 'string') {
+        return [ { id: 'copy', title: 'Copy item', description: JSON.stringify(j), role: 'fileops', deps: [], budgets: {} } ]
+      }
+    }
+  } catch {}
   // Check for uploaded image first
   const uploadedImageMatch = prompt.match(/\[UPLOADED_IMAGE_PATH:([^\]]+)\]\s*(.*)/)
   if (uploadedImageMatch) {
@@ -239,6 +483,16 @@ export async function planTasks(prompt: string, modelOverride?: string, deep?: b
   }
   
   // If the user asked for a direct filesystem action like rename, short-circuit the planner
+  const quitPlan = detectAppQuitTask(prompt)
+  if (quitPlan) return quitPlan
+  const focusPlan = detectAppFocusTask(prompt)
+  if (focusPlan) return focusPlan
+  const hidePlan = detectAppHideTask(prompt)
+  if (hidePlan) return hidePlan
+  const restartPlan = detectAppRestartTask(prompt)
+  if (restartPlan) return restartPlan
+  const appOpenPlan = detectAppOpenTask(prompt)
+  if (appOpenPlan) return appOpenPlan
   const openPlan = detectOpenTask(prompt)
   if (openPlan) return openPlan
   const locatePlan = detectLocateTask(prompt)

@@ -8,7 +8,7 @@ import { useState } from "react"
 export type ChatMessage = {
   id: string
   role: "ai" | "user"
-  type?: "text" | "summary" | "code" | "task" | "image" | "file_operation" | "links" | "thinking" | "markdown" | "sources"
+  type?: "text" | "summary" | "code" | "task" | "image" | "file_operation" | "links" | "thinking" | "markdown" | "sources" | "dm_confirm"
   content: string
   summary?: { title: string; bullets: string[] }
   code?: { language: string; code: string; collapsed?: boolean }
@@ -27,6 +27,7 @@ export type ChatMessage = {
   suggestions?: string[]
   links?: Array<{ title: string; url: string; snippet?: string }>
   sourcesQuery?: string
+  dm?: { to: string; message?: string; at?: string }
 }
 
 export function BasicMarkdown({ text }: { text: string }) {
@@ -147,7 +148,7 @@ export function ChatMessageBubble({
         }
       >
         <div className={cn("prose prose-invert max-w-none", "text-sm leading-relaxed")}>
-          <MessageContent message={message} onFileAction={onFileAction} />
+          <MessageContent message={message} onFileAction={onFileAction} onSuggestedAction={onSuggestedAction} />
         </div>
 
         {isAI && message.suggestions && message.suggestions.length > 0 && (
@@ -179,7 +180,7 @@ export function ChatMessageBubble({
   )
 }
 
-function MessageContent({ message, onFileAction }: { message: ChatMessage; onFileAction?: (action: string, path: string) => void }) {
+function MessageContent({ message, onFileAction, onSuggestedAction }: { message: ChatMessage; onFileAction?: (action: string, path: string) => void; onSuggestedAction?: (a: string) => void }) {
   switch (message.type) {
     case "thinking":
       return <ThinkingBox text={message.content} />
@@ -205,6 +206,8 @@ function MessageContent({ message, onFileAction }: { message: ChatMessage; onFil
       return <FileOperationCard fileOp={message.file_operation!} onFileAction={onFileAction} />
     case "links":
       return <LinksCard items={message.links ?? []} />
+    case "dm_confirm":
+      return <DMConfirmCard to={message.dm?.to ?? ""} message={message.dm?.message ?? ""} at={message.dm?.at} onSendAnother={() => onSuggestedAction?.(`/dm ${message.dm?.to ?? ''}: `)} />
     default:
       return <BasicMarkdown text={message.content} />
   }
@@ -472,6 +475,26 @@ function ImageCard({ src, alt, name }: { src: string; alt: string; name: string 
     </div>
   )
 }
+
+function DMConfirmCard({ to, message, at, onSendAnother }: { to: string; message?: string; at?: string; onSendAnother?: () => void }) {
+  const initials = to.split(/\s+/).filter(Boolean).slice(0, 2).map(s => s[0]?.toUpperCase()).join('') || 'DM'
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-200 text-xs font-semibold ring-1 ring-emerald-300/20">{initials}</span>
+          <div className="text-sm text-white/90">Message sent to <strong>{to || 'recipient'}</strong></div>
+        </div>
+        {at && <div className="text-[11px] text-white/50">{new Date(at).toLocaleTimeString()}</div>}
+      </div>
+      {message && (
+        <div className="mt-2 rounded-md border border-white/10 bg-black/30 p-2 text-sm text-white/80 whitespace-pre-wrap">{message}</div>
+      )}
+      <div className="mt-2 flex items-center gap-2">
+        <Button size="sm" variant="secondary" className="h-7 px-2 text-xs bg-white/10 text-white/80 hover:bg-white/20" onClick={onSendAnother}>Send another</Button>
+      </div>
+    </div>
+  )}
 
 function FileOperationCard({ fileOp, onFileAction }: { 
   fileOp: NonNullable<ChatMessage['file_operation']>

@@ -8,8 +8,8 @@
     { "src": "package.json", "use": "@vercel/static-build", "config": { "distDir": "dist" } },
     { "src": "api/**/*.ts", "use": "@vercel/node" }
   ],
-  "rewrites": [
-    { "source": "/lm/(.*)", "destination": "/api/lm/$1" }
+  "routes": [
+    { "src": "/lm/(.*)", "dest": "/api/lm/$1" }
   ]
 }
 

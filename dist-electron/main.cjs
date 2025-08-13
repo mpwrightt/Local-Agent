@@ -1979,6 +1979,54 @@ async function spawnFileOpsAgent(ctx) {
       });
       return { query: listType ? `${listType} on ${scope}` : name, results: candidates, searchType: listType ? "listing" : "filename" };
     }
+    if ((parsed == null ? void 0 : parsed.op) === "mkdir" && typeof parsed.name === "string") {
+      const home2 = import_node_os4.default.homedir();
+      const scopes = {
+        desktop: import_node_path4.default.join(home2, "Desktop"),
+        documents: import_node_path4.default.join(home2, "Documents"),
+        downloads: import_node_path4.default.join(home2, "Downloads"),
+        pictures: import_node_path4.default.join(home2, "Pictures")
+      };
+      const scope = (parsed.scope || "documents").toLowerCase();
+      const base = scopes[scope] || import_node_path4.default.join(home2, "Documents");
+      const target = import_node_path4.default.isAbsolute(parsed.name) ? parsed.name : import_node_path4.default.join(base, parsed.name);
+      try {
+        import_node_fs4.default.mkdirSync(target, { recursive: true });
+      } catch {
+      }
+      db.addRunEvent(ctx.runId, { type: "file_created", taskId: ctx.task.id, path: target });
+      return { path: target, created: true };
+    }
+    if ((parsed == null ? void 0 : parsed.op) === "move" && typeof parsed.src === "string" && typeof parsed.dest === "string") {
+      const expand = (p) => p.startsWith("~") ? import_node_path4.default.join(import_node_os4.default.homedir(), p.slice(1)) : p;
+      const src = expand(parsed.src);
+      const destRaw = expand(parsed.dest);
+      const dest = import_node_path4.default.isAbsolute(destRaw) ? destRaw : import_node_path4.default.join(import_node_path4.default.dirname(src), destRaw);
+      import_node_fs4.default.renameSync(src, dest);
+      db.addRunEvent(ctx.runId, { type: "file_moved", taskId: ctx.task.id, src, dest });
+      return { src, dest };
+    }
+    if ((parsed == null ? void 0 : parsed.op) === "copy" && typeof parsed.src === "string" && typeof parsed.dest === "string") {
+      const expand = (p) => p.startsWith("~") ? import_node_path4.default.join(import_node_os4.default.homedir(), p.slice(1)) : p;
+      const src = expand(parsed.src);
+      const destRaw = expand(parsed.dest);
+      const dest = import_node_path4.default.isAbsolute(destRaw) ? destRaw : import_node_path4.default.join(import_node_path4.default.dirname(src), destRaw);
+      const stat = import_node_fs4.default.statSync(src);
+      if (stat.isDirectory()) {
+        import_node_fs4.default.mkdirSync(dest, { recursive: true });
+        const entries = import_node_fs4.default.readdirSync(src, { withFileTypes: true });
+        for (const it of entries) {
+          if (it.isFile()) {
+            import_node_fs4.default.copyFileSync(import_node_path4.default.join(src, it.name), import_node_path4.default.join(dest, it.name));
+          }
+        }
+      } else {
+        import_node_fs4.default.mkdirSync(import_node_path4.default.dirname(dest), { recursive: true });
+        import_node_fs4.default.copyFileSync(src, dest);
+      }
+      db.addRunEvent(ctx.runId, { type: "file_copied", taskId: ctx.task.id, src, dest });
+      return { src, dest };
+    }
     if ((parsed == null ? void 0 : parsed.op) === "rename" && typeof parsed.src === "string" && typeof parsed.dest === "string") {
       let expandHome = function(p) {
         return p.startsWith("~") ? import_node_path4.default.join(import_node_os4.default.homedir(), p.slice(1)) : p;
@@ -2113,23 +2161,25 @@ __export(shell_exports, {
 function parseCommandFromDescription(desc) {
   try {
     const j = JSON.parse(desc);
-    if (j && typeof j.cmd === "string") return j.cmd;
+    if (j && typeof j.cmd === "string") return { cmd: j.cmd, meta: j.meta };
   } catch {
   }
   const m = desc.match(/^(?:shell:|run:|execute:)\s*(.+)$/i);
-  if (m && m[1]) return m[1].trim();
+  if (m && m[1]) return { cmd: m[1].trim() };
   return null;
 }
 function isWhitelisted(cmd) {
   const first = cmd.trim().split(/\s+/)[0];
-  const whitelist = /* @__PURE__ */ new Set(["git", "ls", "cat", "echo", "pwd"]);
+  const whitelist = /* @__PURE__ */ new Set(["git", "ls", "cat", "echo", "pwd", "open", "osascript", "killall"]);
   return whitelist.has(first);
 }
 async function spawnShellAgent(ctx) {
-  const cmd = parseCommandFromDescription(ctx.task.description);
-  if (!cmd) {
+  const parsed = parseCommandFromDescription(ctx.task.description);
+  if (!parsed) {
     throw new Error("No shell command provided");
   }
+  const cmd = parsed.cmd;
+  const meta = parsed.meta;
   const whitelisted = isWhitelisted(cmd);
   if (!whitelisted && !ctx.automation) {
     db.addRunEvent(ctx.runId, { type: "confirm_dangerous", runId: ctx.runId, taskId: ctx.task.id, op: "shell", path: cmd });
@@ -2137,6 +2187,9 @@ async function spawnShellAgent(ctx) {
     if (!ok) throw new Error("User denied shell command");
   }
   db.addRunEvent(ctx.runId, { type: "shell_start", taskId: ctx.task.id, cmd });
+  if (meta && meta.kind === "slack_dm") {
+    db.addRunEvent(ctx.runId, { type: "dm_hint", taskId: ctx.task.id, to: meta.to, message: meta.message });
+  }
   const shellBin = process.env.SHELL || "/bin/zsh";
   const home = import_node_os5.default.homedir();
   return await new Promise((resolve, reject) => {
@@ -2160,6 +2213,9 @@ async function spawnShellAgent(ctx) {
     child.on("close", (code) => {
       const exitCode = typeof code === "number" ? code : -1;
       db.addRunEvent(ctx.runId, { type: "shell_end", taskId: ctx.task.id, exitCode });
+      if (exitCode === 0 && meta && meta.kind === "slack_dm") {
+        db.addRunEvent(ctx.runId, { type: "dm_sent", taskId: ctx.task.id, to: meta.to, message: meta.message });
+      }
       resolve({ exitCode, stdout: out, stderr: err });
     });
   });
@@ -2178,7 +2234,7 @@ var init_shell = __esm({
 // electron/main.ts
 init_cjs_shims();
 var import_electron2 = require("electron");
-var import_node_path8 = __toESM(require("path"), 1);
+var import_node_path9 = __toESM(require("path"), 1);
 var import_node_url = require("url");
 
 // src/agent/runtime.ts
@@ -3852,12 +3908,12 @@ function encodeURIPath(str2) {
   return str2.replace(/[^A-Za-z0-9\-._~!$&'()*+,;=:@]+/g, encodeURIComponent);
 }
 var EMPTY = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-var createPathTagFunction = (pathEncoder = encodeURIPath) => function path10(statics, ...params) {
+var createPathTagFunction = (pathEncoder = encodeURIPath) => function path11(statics, ...params) {
   if (statics.length === 1)
     return statics[0];
   let postPath = false;
   const invalidSegments = [];
-  const path11 = statics.reduce((previousValue, currentValue, index) => {
+  const path12 = statics.reduce((previousValue, currentValue, index) => {
     var _a3;
     if (/[?#]/.test(currentValue)) {
       postPath = true;
@@ -3875,7 +3931,7 @@ var createPathTagFunction = (pathEncoder = encodeURIPath) => function path10(sta
     }
     return previousValue + currentValue + (index === params.length ? "" : encoded);
   }, "");
-  const pathOnly = path11.split(/[?#]/, 1)[0];
+  const pathOnly = path12.split(/[?#]/, 1)[0];
   const invalidSegmentPattern = /(?<=^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
   let match;
   while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -3896,10 +3952,10 @@ var createPathTagFunction = (pathEncoder = encodeURIPath) => function path10(sta
     }, "");
     throw new OpenAIError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e) => e.error).join("\n")}
-${path11}
+${path12}
 ${underline}`);
   }
-  return path11;
+  return path12;
 };
 var path5 = /* @__PURE__ */ createPathTagFunction(encodeURIPath);
 
@@ -8453,9 +8509,9 @@ var OpenAI = class {
   makeStatusError(status, error, message, headers) {
     return APIError.generate(status, error, message, headers);
   }
-  buildURL(path10, query, defaultBaseURL) {
+  buildURL(path11, query, defaultBaseURL) {
     const baseURL = !__classPrivateFieldGet(this, _OpenAI_instances, "m", _OpenAI_baseURLOverridden).call(this) && defaultBaseURL || this.baseURL;
-    const url = isAbsoluteURL(path10) ? new URL(path10) : new URL(baseURL + (baseURL.endsWith("/") && path10.startsWith("/") ? path10.slice(1) : path10));
+    const url = isAbsoluteURL(path11) ? new URL(path11) : new URL(baseURL + (baseURL.endsWith("/") && path11.startsWith("/") ? path11.slice(1) : path11));
     const defaultQuery = this.defaultQuery();
     if (!isEmptyObj(defaultQuery)) {
       query = { ...defaultQuery, ...query };
@@ -8478,24 +8534,24 @@ var OpenAI = class {
    */
   async prepareRequest(request, { url, options }) {
   }
-  get(path10, opts) {
-    return this.methodRequest("get", path10, opts);
+  get(path11, opts) {
+    return this.methodRequest("get", path11, opts);
   }
-  post(path10, opts) {
-    return this.methodRequest("post", path10, opts);
+  post(path11, opts) {
+    return this.methodRequest("post", path11, opts);
   }
-  patch(path10, opts) {
-    return this.methodRequest("patch", path10, opts);
+  patch(path11, opts) {
+    return this.methodRequest("patch", path11, opts);
   }
-  put(path10, opts) {
-    return this.methodRequest("put", path10, opts);
+  put(path11, opts) {
+    return this.methodRequest("put", path11, opts);
   }
-  delete(path10, opts) {
-    return this.methodRequest("delete", path10, opts);
+  delete(path11, opts) {
+    return this.methodRequest("delete", path11, opts);
   }
-  methodRequest(method, path10, opts) {
+  methodRequest(method, path11, opts) {
     return this.request(Promise.resolve(opts).then((opts2) => {
-      return { method, path: path10, ...opts2 };
+      return { method, path: path11, ...opts2 };
     }));
   }
   request(options, remainingRetries = null) {
@@ -8600,8 +8656,8 @@ var OpenAI = class {
     }));
     return { response, options, controller, requestLogID, retryOfRequestLogID, startTime };
   }
-  getAPIList(path10, Page2, opts) {
-    return this.requestAPIList(Page2, { method: "get", path: path10, ...opts });
+  getAPIList(path11, Page2, opts) {
+    return this.requestAPIList(Page2, { method: "get", path: path11, ...opts });
   }
   requestAPIList(Page2, options) {
     const request = this.makeRequest(options, null, void 0);
@@ -8679,8 +8735,8 @@ var OpenAI = class {
   }
   async buildRequest(inputOptions, { retryCount = 0 } = {}) {
     const options = { ...inputOptions };
-    const { method, path: path10, query, defaultBaseURL } = options;
-    const url = this.buildURL(path10, query, defaultBaseURL);
+    const { method, path: path11, query, defaultBaseURL } = options;
+    const url = this.buildURL(path11, query, defaultBaseURL);
     if ("timeout" in options)
       validatePositiveInteger("timeout", options.timeout);
     options.timeout = options.timeout ?? this.timeout;
@@ -8789,6 +8845,9 @@ init_cjs_shims();
 
 // src/agent/task_planner.ts
 var import_zod = require("zod");
+var import_node_fs5 = __toESM(require("fs"), 1);
+var import_node_path5 = __toESM(require("path"), 1);
+var import_node_os6 = __toESM(require("os"), 1);
 var TaskSchema = import_zod.z.object({
   id: import_zod.z.string(),
   title: import_zod.z.string(),
@@ -8930,6 +8989,220 @@ function detectOpenTask(prompt) {
   }
   return null;
 }
+function detectAppOpenTask(prompt) {
+  const p = prompt.trim();
+  const m = p.match(/\b(?:open|launch|start)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i);
+  if (!m || !m[1]) return null;
+  let raw = m[1].trim();
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, "").trim();
+  if (!raw) return null;
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw);
+  const cmd = `open -a "${canonical}"`;
+  return [
+    { id: "open_app", title: `Open ${canonical}`, description: JSON.stringify({ cmd }), role: "shell", deps: [], budgets: {} }
+  ];
+}
+function detectAppQuitTask(prompt) {
+  const p = prompt.trim();
+  const m = p.match(/\b(?:quit|close|exit|kill)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i);
+  if (!m || !m[1]) return null;
+  let raw = m[1].trim();
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, "").trim();
+  if (!raw) return null;
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw);
+  const cmd = `osascript -e 'tell application "${canonical}" to quit'`;
+  return [
+    { id: "quit_app", title: `Quit ${canonical}`, description: JSON.stringify({ cmd }), role: "shell", deps: [], budgets: {} }
+  ];
+}
+function detectAppFocusTask(prompt) {
+  const p = prompt.trim();
+  const m = p.match(/\b(?:focus|switch\s+to|bring\s+(?:it|app|application)?\s*to\s+front|show)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i);
+  if (!m || !m[1]) return null;
+  let raw = m[1].trim();
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, "").trim();
+  if (!raw) return null;
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw);
+  const cmd = `osascript -e 'tell application "${canonical}" to activate'`;
+  return [{ id: "focus_app", title: `Focus ${canonical}`, description: JSON.stringify({ cmd }), role: "shell", deps: [], budgets: {} }];
+}
+function detectAppHideTask(prompt) {
+  const p = prompt.trim();
+  const m = p.match(/\b(?:hide|minimise|minimize)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i);
+  if (!m || !m[1]) return null;
+  let raw = m[1].trim();
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, "").trim();
+  if (!raw) return null;
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw);
+  const cmd = `osascript -e 'tell application "${canonical}" to hide'`;
+  return [{ id: "hide_app", title: `Hide ${canonical}`, description: JSON.stringify({ cmd }), role: "shell", deps: [], budgets: {} }];
+}
+function detectAppRestartTask(prompt) {
+  const p = prompt.trim();
+  const m = p.match(/\b(?:restart|relaunch|reopen)\s+(?:the\s+)?(?:(?:app(?:lication)?|program)\s+)?([A-Za-z0-9 .+&_:\-]+?)(?:\s+app(?:lication)?)?(?:[.!?]|\s*$)/i);
+  if (!m || !m[1]) return null;
+  let raw = m[1].trim();
+  raw = raw.replace(/\s*(?:please|for\s+me|now)\s*$/i, "").trim();
+  if (!raw) return null;
+  const canonical = resolveAppName(raw) || canonicalizeAppName(raw);
+  const quitCmd = `osascript -e 'tell application "${canonical}" to quit'`;
+  const openCmd = `open -a "${canonical}"`;
+  return [
+    { id: "quit_app", title: `Quit ${canonical}`, description: JSON.stringify({ cmd: quitCmd }), role: "shell", deps: [], budgets: {} },
+    { id: "open_app", title: `Open ${canonical}`, description: JSON.stringify({ cmd: openCmd }), role: "shell", deps: ["quit_app"], budgets: {} }
+  ];
+}
+function canonicalizeAppName(name) {
+  const n = name.trim();
+  const lower = n.toLowerCase();
+  const map = {
+    "slack": "Slack",
+    "chrome": "Google Chrome",
+    "google chrome": "Google Chrome",
+    "safari": "Safari",
+    "finder": "Finder",
+    "terminal": "Terminal",
+    "iterm": "iTerm",
+    "iterm2": "iTerm",
+    "vscode": "Visual Studio Code",
+    "vs code": "Visual Studio Code",
+    "code": "Visual Studio Code",
+    "xcode": "Xcode",
+    "notes": "Notes",
+    "messages": "Messages",
+    "mail": "Mail",
+    "outlook": "Microsoft Outlook",
+    "ms outlook": "Microsoft Outlook",
+    "microsoft outlook": "Microsoft Outlook",
+    "preview": "Preview",
+    "calendar": "Calendar",
+    "reminders": "Reminders",
+    "spotify": "Spotify",
+    "discord": "Discord",
+    "zoom": "zoom.us",
+    "system preferences": "System Settings",
+    "settings": "System Settings"
+  };
+  if (map[lower]) return map[lower];
+  const titleCase = n.replace(/\b\w+/g, (w) => w.charAt(0).toUpperCase() + w.slice(1));
+  return titleCase;
+}
+function resolveAppName(input) {
+  const normalizedInput = normalizeAppName(input);
+  const candidates = /* @__PURE__ */ new Set();
+  for (const a of KNOWN_APPS) candidates.add(a);
+  for (const a of getInstalledApps()) candidates.add(a);
+  const normInput = normalizeForCompare(normalizedInput);
+  for (const cand of candidates) {
+    const normCand = normalizeForCompare(cand);
+    if (normCand.includes(normInput) || normInput.includes(normCand)) {
+      return cand;
+    }
+  }
+  let best = null;
+  for (const cand of candidates) {
+    const normCand = normalizeForCompare(cand);
+    if (normCand === normInput) return cand;
+    if (normCand[0] !== normInput[0]) continue;
+    const score = similarity(normInput, normCand);
+    if (!best || score > best.score) best = { name: cand, score };
+  }
+  if (best && best.score >= 0.75) return best.name;
+  return null;
+}
+var KNOWN_APPS = [
+  "Slack",
+  "Google Chrome",
+  "Visual Studio Code",
+  "Safari",
+  "Finder",
+  "Terminal",
+  "iTerm",
+  "Xcode",
+  "Notes",
+  "Messages",
+  "Mail",
+  "Preview",
+  "Calendar",
+  "Reminders",
+  "Spotify",
+  "Discord",
+  "zoom.us",
+  "Zoom",
+  "System Settings",
+  "Microsoft Outlook",
+  "Arc",
+  "Firefox",
+  "Notion",
+  "Obsidian",
+  "Postman",
+  "TablePlus",
+  "Docker",
+  "WhatsApp",
+  "Telegram",
+  "Signal",
+  "1Password",
+  "Raycast",
+  "Figma",
+  "Microsoft Word",
+  "Microsoft Excel",
+  "Microsoft PowerPoint"
+];
+var installedAppsCache = null;
+function getInstalledApps() {
+  if (installedAppsCache) return installedAppsCache;
+  const roots = [
+    "/Applications",
+    "/System/Applications",
+    import_node_path5.default.join(import_node_os6.default.homedir(), "Applications"),
+    "/Applications/Utilities"
+  ];
+  const seen = /* @__PURE__ */ new Set();
+  for (const root of roots) {
+    try {
+      const entries = import_node_fs5.default.readdirSync(root, { withFileTypes: true });
+      for (const ent of entries) {
+        if (ent.isDirectory() && ent.name.endsWith(".app")) {
+          const base = ent.name.replace(/\.app$/i, "");
+          if (!seen.has(base)) seen.add(base);
+        }
+      }
+    } catch {
+    }
+  }
+  installedAppsCache = Array.from(seen);
+  return installedAppsCache;
+}
+function normalizeAppName(s) {
+  return s.replace(/\.app$/i, "").trim();
+}
+function normalizeForCompare(s) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+function similarity(a, b) {
+  if (!a || !b) return 0;
+  const dist = levenshtein(a, b);
+  const denom = Math.max(a.length, b.length);
+  return denom === 0 ? 0 : 1 - dist / denom;
+}
+function levenshtein(a, b) {
+  const m = a.length;
+  const n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[m][n];
+}
 function detectRenameTask(prompt) {
   const p = prompt.trim();
   try {
@@ -8959,6 +9232,36 @@ function detectRenameTask(prompt) {
 }
 async function planTasks(prompt, modelOverride, deep, automation) {
   var _a3, _b;
+  try {
+    const j = JSON.parse(prompt);
+    if (j && typeof j === "object") {
+      if (j.op === "shell" && typeof j.cmd === "string") {
+        return [{ id: "sh1", title: "Run shell command", description: JSON.stringify({ cmd: j.cmd, meta: j.meta }), role: "shell", deps: [], budgets: {} }];
+      }
+      if (j.op === "open" && typeof j.name === "string") {
+        return [{ id: "open", title: `Open ${j.name}`, description: JSON.stringify(j), role: "fileops", deps: [], budgets: {} }];
+      }
+      if (j.op === "rename" && typeof j.src === "string" && typeof j.dest === "string") {
+        return [{ id: "rename", title: "Rename file", description: JSON.stringify(j), role: "fileops", deps: [], budgets: {} }];
+      }
+      if (j.op === "locate" && typeof j.name === "string") {
+        return [{ id: "locate", title: "Locate", description: JSON.stringify(j), role: "fileops", deps: [], budgets: {} }];
+      }
+      if (j.op === "ocr_search" && (typeof j.text === "string" || j.text === "*")) {
+        return [{ id: "ocr", title: "OCR search", description: JSON.stringify(j), role: "fileops", deps: [], budgets: {} }];
+      }
+      if (j.op === "mkdir" && typeof j.name === "string") {
+        return [{ id: "mkdir", title: `Create folder ${j.name}`, description: JSON.stringify(j), role: "fileops", deps: [], budgets: {} }];
+      }
+      if (j.op === "move" && typeof j.src === "string" && typeof j.dest === "string") {
+        return [{ id: "move", title: "Move item", description: JSON.stringify(j), role: "fileops", deps: [], budgets: {} }];
+      }
+      if (j.op === "copy" && typeof j.src === "string" && typeof j.dest === "string") {
+        return [{ id: "copy", title: "Copy item", description: JSON.stringify(j), role: "fileops", deps: [], budgets: {} }];
+      }
+    }
+  } catch {
+  }
   const uploadedImageMatch = prompt.match(/\[UPLOADED_IMAGE_PATH:([^\]]+)\]\s*(.*)/);
   if (uploadedImageMatch) {
     const imagePath = uploadedImageMatch[1];
@@ -8984,6 +9287,16 @@ async function planTasks(prompt, modelOverride, deep, automation) {
       }
     ];
   }
+  const quitPlan = detectAppQuitTask(prompt);
+  if (quitPlan) return quitPlan;
+  const focusPlan = detectAppFocusTask(prompt);
+  if (focusPlan) return focusPlan;
+  const hidePlan = detectAppHideTask(prompt);
+  if (hidePlan) return hidePlan;
+  const restartPlan = detectAppRestartTask(prompt);
+  if (restartPlan) return restartPlan;
+  const appOpenPlan = detectAppOpenTask(prompt);
+  if (appOpenPlan) return appOpenPlan;
   const openPlan = detectOpenTask(prompt);
   if (openPlan) return openPlan;
   const locatePlan = detectLocateTask(prompt);
@@ -9099,7 +9412,7 @@ function detectShellTask(prompt) {
 // src/agent/graph.ts
 init_cjs_shims();
 var import_langgraph = require("@langchain/langgraph");
-var import_node_fs5 = __toESM(require("fs"), 1);
+var import_node_fs6 = __toESM(require("fs"), 1);
 init_db();
 var ResearchState = import_langgraph.Annotation.Root({
   prompt: (0, import_langgraph.Annotation)({ value: (_prev, next) => next }),
@@ -9116,8 +9429,8 @@ async function prepareNode(_state) {
 }
 function parseAggregate(aggregatePath) {
   try {
-    if (!aggregatePath || !import_node_fs5.default.existsSync(aggregatePath)) return [];
-    const raw = import_node_fs5.default.readFileSync(aggregatePath, "utf8");
+    if (!aggregatePath || !import_node_fs6.default.existsSync(aggregatePath)) return [];
+    const raw = import_node_fs6.default.readFileSync(aggregatePath, "utf8");
     const blocks = raw.split(/\n---\n\n?/);
     const out = [];
     for (const b of blocks) {
@@ -9163,9 +9476,9 @@ async function synthesizeNode(state) {
   } catch {
   }
   let corpus = "";
-  if (state.aggregatePath && import_node_fs5.default.existsSync(state.aggregatePath)) {
+  if (state.aggregatePath && import_node_fs6.default.existsSync(state.aggregatePath)) {
     try {
-      corpus = import_node_fs5.default.readFileSync(state.aggregatePath, "utf8");
+      corpus = import_node_fs6.default.readFileSync(state.aggregatePath, "utf8");
       if (corpus.length > 16e3) corpus = corpus.slice(0, 16e3);
     } catch {
     }
@@ -9217,9 +9530,9 @@ function buildResearchGraph() {
 }
 
 // src/agent/scheduler.ts
-var import_node_fs6 = __toESM(require("fs"), 1);
-var import_node_os6 = __toESM(require("os"), 1);
-var import_node_path5 = __toESM(require("path"), 1);
+var import_node_fs7 = __toESM(require("fs"), 1);
+var import_node_os7 = __toESM(require("os"), 1);
+var import_node_path6 = __toESM(require("path"), 1);
 var activeRuns = /* @__PURE__ */ new Map();
 async function startOrchestrator(input) {
   const controller = new AbortController();
@@ -9292,19 +9605,19 @@ async function executeTask(task, ctx, signal) {
           for (const r of researchResults) {
             const pth = r == null ? void 0 : r.aggregatePath;
             try {
-              if (pth && import_node_fs6.default.existsSync(pth)) {
-                corpusParts.push(import_node_fs6.default.readFileSync(pth, "utf8"));
+              if (pth && import_node_fs7.default.existsSync(pth)) {
+                corpusParts.push(import_node_fs7.default.readFileSync(pth, "utf8"));
               }
             } catch {
             }
           }
           let aggregatePath = void 0;
           if (corpusParts.length > 0) {
-            const baseDir = import_node_path5.default.join(import_node_os6.default.homedir(), ".local-agent");
-            if (!import_node_fs6.default.existsSync(baseDir)) import_node_fs6.default.mkdirSync(baseDir, { recursive: true });
-            aggregatePath = import_node_path5.default.join(baseDir, `research-aggregate-merged-${Date.now()}.txt`);
+            const baseDir = import_node_path6.default.join(import_node_os7.default.homedir(), ".local-agent");
+            if (!import_node_fs7.default.existsSync(baseDir)) import_node_fs7.default.mkdirSync(baseDir, { recursive: true });
+            aggregatePath = import_node_path6.default.join(baseDir, `research-aggregate-merged-${Date.now()}.txt`);
             try {
-              import_node_fs6.default.writeFileSync(aggregatePath, corpusParts.join("\n\n---\n\n"), "utf8");
+              import_node_fs7.default.writeFileSync(aggregatePath, corpusParts.join("\n\n---\n\n"), "utf8");
             } catch {
             }
           }
@@ -9350,8 +9663,8 @@ function cancelRun(runId) {
 
 // src/agent/registry.ts
 init_cjs_shims();
-var import_node_path6 = __toESM(require("path"), 1);
-var import_node_fs7 = __toESM(require("fs"), 1);
+var import_node_path7 = __toESM(require("path"), 1);
+var import_node_fs8 = __toESM(require("fs"), 1);
 var import_zod2 = require("zod");
 init_db();
 var registry = /* @__PURE__ */ new Map();
@@ -9369,9 +9682,9 @@ var ManifestSchema = import_zod2.z.object({
   permissions: import_zod2.z.array(import_zod2.z.string()).default([])
 });
 async function loadPlugins(pluginsDir) {
-  const root = pluginsDir ?? import_node_path6.default.join(process.cwd(), "src", "plugins");
-  if (!import_node_fs7.default.existsSync(root)) return { loaded: 0 };
-  const files = import_node_fs7.default.readdirSync(root);
+  const root = pluginsDir ?? import_node_path7.default.join(process.cwd(), "src", "plugins");
+  if (!import_node_fs8.default.existsSync(root)) return { loaded: 0 };
+  const files = import_node_fs8.default.readdirSync(root);
   let loaded = 0;
   for (const [role, reg] of Array.from(registry.entries())) {
     if (reg.source === "plugin") registry.delete(role);
@@ -9379,12 +9692,12 @@ async function loadPlugins(pluginsDir) {
   pluginIds.clear();
   for (const name of files) {
     try {
-      const dir = import_node_path6.default.join(root, name);
-      const manifestPath = import_node_path6.default.join(dir, "manifest.json");
-      if (!import_node_fs7.default.existsSync(manifestPath)) continue;
-      const raw = JSON.parse(import_node_fs7.default.readFileSync(manifestPath, "utf8"));
+      const dir = import_node_path7.default.join(root, name);
+      const manifestPath = import_node_path7.default.join(dir, "manifest.json");
+      if (!import_node_fs8.default.existsSync(manifestPath)) continue;
+      const raw = JSON.parse(import_node_fs8.default.readFileSync(manifestPath, "utf8"));
       const manifest = ManifestSchema.parse(raw);
-      const modPath = import_node_path6.default.isAbsolute(manifest.entrypoint) ? manifest.entrypoint : import_node_path6.default.join(dir, manifest.entrypoint);
+      const modPath = import_node_path7.default.isAbsolute(manifest.entrypoint) ? manifest.entrypoint : import_node_path7.default.join(dir, manifest.entrypoint);
       const mod = await import(pathToFileUrlSafe(modPath));
       const runner = typeof mod.default === "function" ? mod.default : mod.runner;
       const lifecycle = mod.lifecycle;
@@ -9427,8 +9740,8 @@ function registerBuiltInWorkers() {
   }
 }
 function watchPlugins(pluginsDir) {
-  const root = pluginsDir ?? import_node_path6.default.join(process.cwd(), "src", "plugins");
-  if (!import_node_fs7.default.existsSync(root)) return;
+  const root = pluginsDir ?? import_node_path7.default.join(process.cwd(), "src", "plugins");
+  if (!import_node_fs8.default.existsSync(root)) return;
   let timer = null;
   const trigger = () => {
     if (timer) clearTimeout(timer);
@@ -9437,7 +9750,7 @@ function watchPlugins(pluginsDir) {
     }, 250);
   };
   try {
-    import_node_fs7.default.watch(root, { recursive: true }, trigger);
+    import_node_fs8.default.watch(root, { recursive: true }, trigger);
     db.addRunEvent("system", { type: "plugin_watch", message: `Watching ${root}` });
   } catch (e) {
     db.addRunEvent("system", { type: "plugin_watch_error", message: String((e == null ? void 0 : e.message) ?? e) });
@@ -9449,16 +9762,16 @@ init_confirm();
 
 // src/agent/config.ts
 init_cjs_shims();
-var import_node_fs8 = __toESM(require("fs"), 1);
-var import_node_path7 = __toESM(require("path"), 1);
-var import_node_os7 = __toESM(require("os"), 1);
+var import_node_fs9 = __toESM(require("fs"), 1);
+var import_node_path8 = __toESM(require("path"), 1);
+var import_node_os8 = __toESM(require("os"), 1);
 var overrideDir = process.env.LOCAL_AGENT_CONFIG_DIR;
-var CONFIG_DIR = overrideDir ? import_node_path7.default.resolve(overrideDir) : import_node_path7.default.join(import_node_os7.default.homedir(), ".local-agent");
-var CONFIG_PATH = import_node_path7.default.join(CONFIG_DIR, "config.json");
+var CONFIG_DIR = overrideDir ? import_node_path8.default.resolve(overrideDir) : import_node_path8.default.join(import_node_os8.default.homedir(), ".local-agent");
+var CONFIG_PATH = import_node_path8.default.join(CONFIG_DIR, "config.json");
 function readConfig() {
   try {
-    if (import_node_fs8.default.existsSync(CONFIG_PATH)) {
-      return JSON.parse(import_node_fs8.default.readFileSync(CONFIG_PATH, "utf8"));
+    if (import_node_fs9.default.existsSync(CONFIG_PATH)) {
+      return JSON.parse(import_node_fs9.default.readFileSync(CONFIG_PATH, "utf8"));
     }
   } catch {
   }
@@ -9466,8 +9779,8 @@ function readConfig() {
 }
 function writeConfig(cfg) {
   try {
-    if (!import_node_fs8.default.existsSync(CONFIG_DIR)) import_node_fs8.default.mkdirSync(CONFIG_DIR, { recursive: true });
-    import_node_fs8.default.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf8");
+    if (!import_node_fs9.default.existsSync(CONFIG_DIR)) import_node_fs9.default.mkdirSync(CONFIG_DIR, { recursive: true });
+    import_node_fs9.default.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf8");
   } catch {
   }
 }
@@ -9518,7 +9831,8 @@ async function quickSearch(query, count = 3) {
       }
     }
     const url = "https://duckduckgo.com/html/?kz=1&q=" + encodeURIComponent(query);
-    const resp = await doFetch(url);
+    const proxied = "https://r.jina.ai/http/" + url;
+    const resp = await doFetch(proxied);
     const html = await resp.text();
     const results = [];
     const re = /<a[^>]+class="result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gim;
@@ -9647,8 +9961,8 @@ function createAgentRuntime(ipcMain2) {
   });
   ipcMain2.handle("agent/readFileText", async (_event, input) => {
     try {
-      const fs9 = await import("fs");
-      const content = fs9.readFileSync(input.path, "utf8");
+      const fs10 = await import("fs");
+      const content = fs10.readFileSync(input.path, "utf8");
       return { success: true, content };
     } catch (error) {
       return { success: false, error: error.message };
@@ -9791,14 +10105,14 @@ function setupEventForwarding(win) {
 // electron/main.ts
 var import_config2 = require("dotenv/config");
 var __filename2 = (0, import_node_url.fileURLToPath)(importMetaUrl);
-var __dirname = import_node_path8.default.dirname(__filename2);
+var __dirname = import_node_path9.default.dirname(__filename2);
 var mainWindow = null;
 async function createWindow() {
   mainWindow = new import_electron2.BrowserWindow({
     width: 1280,
     height: 800,
     webPreferences: {
-      preload: import_node_path8.default.join(__dirname, "preload.cjs"),
+      preload: import_node_path9.default.join(__dirname, "preload.cjs"),
       nodeIntegration: false,
       contextIsolation: true
     },
@@ -9808,7 +10122,7 @@ async function createWindow() {
   if (devUrl) {
     await mainWindow.loadURL(devUrl);
   } else {
-    await mainWindow.loadFile(import_node_path8.default.join(__dirname, "../dist/index.html"));
+    await mainWindow.loadFile(import_node_path9.default.join(__dirname, "../dist/index.html"));
   }
   const ok = import_electron2.globalShortcut.register("CommandOrControl+/", () => {
     if (!mainWindow) return;
