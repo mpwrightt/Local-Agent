@@ -1,4 +1,5 @@
-import OpenAI from 'openai'
+// Avoid importing openai typings at build time; runtime client uses fetch
+type OpenAI = any
 import { z } from 'zod'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -519,10 +520,28 @@ ${automation ?
 Respond with valid JSON only, no other text.`
 
   const baseURL = process.env.LMSTUDIO_HOST ?? 'http://127.0.0.1:1234/v1'
-  const client = new OpenAI({
-    baseURL,
-    apiKey: 'not-needed'
-  })
+  const client: any = {
+    chat: {
+      completions: {
+        create: async (body: any) => {
+          const r = await fetch(baseURL.replace(/\/$/, '') + '/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: body.model, messages: body.messages, temperature: 0.2 })
+          })
+          const j: any = await r.json()
+          return j
+        }
+      }
+    },
+    models: {
+      list: async () => {
+        const r = await fetch(baseURL.replace(/\/$/, '') + '/models')
+        const j: any = await r.json()
+        return j
+      }
+    }
+  }
   let res: any
   let modelName = modelOverride ?? (await selectModel(client))
   try {

@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 // Lightweight tabs helper imported but not currently used; kept for future tab refactor
 // import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { quickSearch } from '@/agent/web'
+import { BlobVisualizer } from '@/components/voice/BlobVisualizer'
 
 type AgentPayload = {
   type?: string
@@ -649,7 +650,12 @@ export default function App() {
                     onUserQuery={async (query) => {
                       await handleSend(query, { mode: 'chat' })
                     }}
-                  />
+                  >
+                    {/* Visualizer slot */}
+                    <div className="flex items-center justify-center my-4">
+                      <BlobVisualizer listening={!voiceBusy} speaking={voiceBusy} />
+                    </div>
+                  </VoiceDuplex>
                 </div>
               </div>
             </div>
@@ -662,7 +668,7 @@ export default function App() {
   )
 }
 
-function VoiceDuplex({ busy, voiceId, onVoiceIdChange, voices, onLoadVoices, onSpeak, onUserQuery }: {
+function VoiceDuplex({ busy, voiceId, onVoiceIdChange, voices, onLoadVoices, onSpeak, onUserQuery, children }: {
   busy: boolean
   voiceId: string
   onVoiceIdChange: (id: string) => void
@@ -670,6 +676,7 @@ function VoiceDuplex({ busy, voiceId, onVoiceIdChange, voices, onLoadVoices, onS
   onLoadVoices: () => Promise<void>
   onSpeak: (text: string) => Promise<void>
   onUserQuery: (text: string) => Promise<void>
+  children?: any
 }) {
   const [listening, setListening] = useState(false)
   const [interim, setInterim] = useState('')
@@ -722,6 +729,7 @@ function VoiceDuplex({ busy, voiceId, onVoiceIdChange, voices, onLoadVoices, onS
           <span className="absolute text-white/80 text-xs">{busy ? '...' : (listening ? 'Listening' : 'Tap to talk')}</span>
         </button>
       </div>
+      {children}
       {interim && (
         <div className="text-center text-xs text-white/60">{interim}</div>
       )}
