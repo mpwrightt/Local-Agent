@@ -119,7 +119,7 @@ export function ChatInput({
       
       {/* Main input area */}
       <div
-        className="rounded-2xl border border-white/10 p-2 backdrop-blur"
+        className="relative rounded-2xl border border-white/10 p-2 backdrop-blur"
         style={{
           background: "linear-gradient(135deg, rgba(var(--accent-1),0.08), rgba(var(--accent-2),0.06))",
           boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
@@ -142,23 +142,18 @@ export function ChatInput({
             "w-full resize-none bg-transparent px-2 py-2 text-sm text-white/90 outline-none placeholder:text-white/40",
           )}
         />
-        {/* Inline slash suggestions */}
+        {/* Compact slash suggestions (floating, non-intrusive) */}
         {value.startsWith('/') && (
-          <div className="mt-2 rounded-lg border border-white/10 bg-[oklch(var(--background))]/90 p-2 text-xs text-white/80">
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-white/50">Commands</div>
+          <div className="absolute left-2 bottom-12 z-20 w-[min(360px,calc(100%-16px))] rounded-lg border border-white/10 bg-[oklch(var(--background))]/95 p-2 text-xs text-white/80 shadow-xl backdrop-blur supports-[backdrop-filter]:bg-white/10">
             <div className="grid gap-1">
-              {listSlashCommands(value).slice(0,7).map(cmd => (
-                <div key={cmd.id} className="flex items-start justify-between gap-2">
+              {listSlashCommands(value).slice(0,4).map(cmd => (
+                <div key={cmd.id} className="flex items-start gap-2 px-1 py-1 rounded-md hover:bg-white/5">
                   <div>
-                    <div className="font-medium">/{cmd.label}</div>
-                    {cmd.description && <div className="text-white/60">{cmd.description}</div>}
-                    {cmd.usage && <div className="text-white/40">Usage: {cmd.usage}</div>}
+                    <div className="font-medium text-white/90">/{cmd.label}</div>
+                    {cmd.description && <div className="text-white/60 line-clamp-1 max-w-[320px]">{cmd.description}</div>}
                   </div>
                 </div>
               ))}
-            </div>
-            <div className="mt-2 text-white/50">
-              Tip: Use <span className="text-white/80">/open</span> to launch apps, <span className="text-white/80">/locate</span> to find files, <span className="text-white/80">/rename</span> to rename, and <span className="text-white/80">/ocr</span> to search images. Press Enter to run.
             </div>
           </div>
         )}
