@@ -155,6 +155,23 @@ export function createAgentRuntime(ipcMain: IpcMain) {
     }
   })
 
+  // ElevenLabs: list voices
+  ipcMain.handle('agent/elevenVoices', async () => {
+    try {
+      const key = await getElevenLabsKey()
+      if (!key) return { success: false, error: 'Missing ELEVENLABS_API_KEY or keys.md' }
+      const r = await fetch('https://api.elevenlabs.io/v1/voices', {
+        headers: { 'xi-api-key': key }
+      })
+      if (!r.ok) return { success: false, error: `HTTP ${r.status}` }
+      const j: any = await r.json()
+      const voices = Array.isArray(j?.voices) ? j.voices.map((v: any) => ({ id: v.voice_id || v.voiceID || v.id, name: v.name || 'Voice', category: v.category || '', labels: v.labels || {} })) : []
+      return { success: true, voices }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
   // Save uploaded image to temp file
   ipcMain.handle('agent/saveUploadedImage', async (_event, input: { dataUrl: string; fileName: string }) => {
     const { tmpdir } = await import('os')

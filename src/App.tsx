@@ -40,6 +40,8 @@ export default function App() {
   const [showThinking, setShowThinking] = useState<boolean>(true)
   const [activeTab, setActiveTab] = useState<'chat' | 'voice' | 'logs'>('chat')
   const [voiceBusy, setVoiceBusy] = useState<boolean>(false)
+  const [voices, setVoices] = useState<Array<{ id: string; name: string }>>([])
+  const [voiceId, setVoiceId] = useState<string>('21m00Tcm4TlvDq8ikWAM')
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [remoteMode] = useState<boolean>(false)
   const [remoteBase] = useState<string>('')
@@ -618,26 +620,36 @@ export default function App() {
               <div className="w-full max-w-xl space-y-3">
                 <div className="rounded-xl border border-white/10 bg-white/5 p-4">
                   <div className="text-sm font-semibold text-white/90 mb-2">ElevenLabs Voice</div>
-                  <div className="text-xs text-white/60 mb-3">Type text and play with ElevenLabs TTS. Your key can be set via env ELEVENLABS_API_KEY or by placing it in `keys.md` as 'eleven labs key: ...'.</div>
-                  <VoicePanel playing={voiceBusy} onPlay={async (text) => {
-                    if (!text.trim()) return
-                    setVoiceBusy(true)
-                    try {
-                      const res = await (window as any).agent?.voiceTTS?.({ text })
-                      if (res?.success && res.audioBase64) {
-                        const src = `data:audio/mp3;base64,${res.audioBase64}`
-                        if (!audioRef.current) audioRef.current = new Audio()
-                        audioRef.current.src = src
-                        await audioRef.current.play()
-                      } else {
-                        alert(res?.error || 'TTS failed')
+                  <div className="text-xs text-white/60 mb-3">Hands-free: click mic to talk. Persona selector picks the ElevenLabs voice.</div>
+                  <VoiceDuplex
+                    busy={voiceBusy}
+                    voiceId={voiceId}
+                    onVoiceIdChange={setVoiceId}
+                    voices={voices}
+                    onLoadVoices={async () => {
+                      try {
+                        const res = await (window as any).agent?.listVoices?.()
+                        if (res?.success && Array.isArray(res.voices)) setVoices(res.voices.map((v: any) => ({ id: v.id, name: v.name })))
+                      } catch {}
+                    }}
+                    onSpeak={async (text) => {
+                      setVoiceBusy(true)
+                      try {
+                        const res = await (window as any).agent?.voiceTTS?.({ text, voiceId })
+                        if (res?.success && res.audioBase64) {
+                          const src = `data:audio/mp3;base64,${res.audioBase64}`
+                          if (!audioRef.current) audioRef.current = new Audio()
+                          audioRef.current.src = src
+                          await audioRef.current.play()
+                        }
+                      } finally {
+                        setVoiceBusy(false)
                       }
-                    } catch (err) {
-                      alert(String(err))
-                    } finally {
-                      setVoiceBusy(false)
-                    }
-                  }} />
+                    }}
+                    onUserQuery={async (query) => {
+                      await handleSend(query, { mode: 'chat' })
+                    }}
+                  />
                 </div>
               </div>
             </div>
@@ -650,21 +662,69 @@ export default function App() {
   )
 }
 
-function VoicePanel({ playing, onPlay }: { playing: boolean; onPlay: (text: string) => Promise<void> }) {
-  const [text, setText] = useState<string>('Hello from Local Agent using ElevenLabs!')
+function VoiceDuplex({ busy, voiceId, onVoiceIdChange, voices, onLoadVoices, onSpeak, onUserQuery }: {
+  busy: boolean
+  voiceId: string
+  onVoiceIdChange: (id: string) => void
+  voices: Array<{ id: string; name: string }>
+  onLoadVoices: () => Promise<void>
+  onSpeak: (text: string) => Promise<void>
+  onUserQuery: (text: string) => Promise<void>
+}) {
+  const [listening, setListening] = useState(false)
+  const [interim, setInterim] = useState('')
+  const recRef = useRef<any>(null)
+  useEffect(() => { onLoadVoices().catch(() => {}) }, [])
+  useEffect(() => {
+    const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
+    if (!SR) return
+    const rec = new SR()
+    recRef.current = rec
+    rec.continuous = true
+    rec.interimResults = true
+    rec.lang = 'en-US'
+    rec.onresult = (e: any) => {
+      let final = ''
+      let interimLocal = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const res = e.results[i]
+        if (res.isFinal) final += res[0].transcript
+        else interimLocal += res[0].transcript
+      }
+      setInterim(interimLocal)
+      if (final.trim()) {
+        onUserQuery(final.trim())
+        onSpeak(final.trim()).catch(() => {})
+      }
+    }
+    rec.onerror = () => {}
+    return () => { try { rec.stop() } catch {} }
+  }, [])
+  async function toggle() {
+    const rec = recRef.current
+    if (!rec) { alert('SpeechRecognition not available in this environment'); return }
+    if (listening) { try { rec.stop() } catch {}; setListening(false); setInterim(''); return }
+    try { rec.start(); setListening(true) } catch {}
+  }
   return (
-    <div className="space-y-2">
-      <textarea
-        className="w-full h-28 rounded-lg bg-white/5 border border-white/10 p-2 text-white"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Type something to speak..."
-      />
-      <div className="flex items-center justify-end gap-2">
-        <Button disabled={playing || !text.trim()} onClick={() => onPlay(text)}>
-          {playing ? 'Playing…' : 'Play'}
-        </Button>
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-xs text-white/70">Persona</div>
+        <select className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-white" value={voiceId} onChange={(e) => onVoiceIdChange(e.target.value)}>
+          {[{ id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel (default)' }, ...voices].map(v => (
+            <option key={v.id} value={v.id}>{v.name}</option>
+          ))}
+        </select>
       </div>
+      <div className="flex items-center justify-center">
+        <button onClick={toggle} disabled={busy} className={`relative h-24 w-24 rounded-full border ${listening ? 'border-blue-400' : 'border-white/10'} bg-white/5 flex items-center justify-center transition-transform hover:scale-[1.03]`}>
+          <span className={`h-16 w-16 rounded-full ${listening ? 'bg-blue-500/40 animate-pulse' : 'bg-white/10'}`}></span>
+          <span className="absolute text-white/80 text-xs">{busy ? '...' : (listening ? 'Listening' : 'Tap to talk')}</span>
+        </button>
+      </div>
+      {interim && (
+        <div className="text-center text-xs text-white/60">{interim}</div>
+      )}
     </div>
   )
 }

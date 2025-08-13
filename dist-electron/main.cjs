@@ -10020,6 +10020,21 @@ function createAgentRuntime(ipcMain2) {
       return { success: false, error: error.message };
     }
   });
+  ipcMain2.handle("agent/elevenVoices", async () => {
+    try {
+      const key = await getElevenLabsKey();
+      if (!key) return { success: false, error: "Missing ELEVENLABS_API_KEY or keys.md" };
+      const r = await fetch("https://api.elevenlabs.io/v1/voices", {
+        headers: { "xi-api-key": key }
+      });
+      if (!r.ok) return { success: false, error: `HTTP ${r.status}` };
+      const j = await r.json();
+      const voices = Array.isArray(j == null ? void 0 : j.voices) ? j.voices.map((v) => ({ id: v.voice_id || v.voiceID || v.id, name: v.name || "Voice", category: v.category || "", labels: v.labels || {} })) : [];
+      return { success: true, voices };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
   ipcMain2.handle("agent/saveUploadedImage", async (_event, input) => {
     const { tmpdir } = await import("os");
     const { join } = await import("path");
