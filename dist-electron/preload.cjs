@@ -15,5 +15,6 @@ import_electron.contextBridge.exposeInMainWorld("agent", {
     const listener = (_, payload) => handler(payload);
     import_electron.ipcRenderer.on("agent/event", listener);
     return () => import_electron.ipcRenderer.removeListener("agent/event", listener);
-  }
+  },
+  voiceTTS: (input) => import_electron.ipcRenderer.invoke("agent/voiceTTS", input)
 });

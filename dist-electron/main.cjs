@@ -9888,6 +9888,29 @@ var LMClient = class {
   }
 };
 function createAgentRuntime(ipcMain2) {
+  async function getElevenLabsKey() {
+    try {
+      if (process.env.ELEVENLABS_API_KEY && process.env.ELEVENLABS_API_KEY.trim().length > 0) {
+        return process.env.ELEVENLABS_API_KEY.trim();
+      }
+    } catch {
+    }
+    try {
+      const { readFileSync, existsSync } = await import("fs");
+      const { join } = await import("path");
+      const roots = [process.cwd(), join(process.cwd(), ".."), join(process.cwd(), "resources")];
+      for (const r of roots) {
+        const p = join(r, "keys.md");
+        if (existsSync(p)) {
+          const t = readFileSync(p, "utf8");
+          const m = t.match(/eleven\s*labs\s*key\s*:\s*([a-zA-Z0-9_\-]+)\b/i);
+          if (m && m[1]) return m[1].trim();
+        }
+      }
+    } catch {
+    }
+    return null;
+  }
   async function detectChatIntent(_client, _modelName, text) {
     var _a3, _b, _c;
     try {
@@ -9964,6 +9987,35 @@ function createAgentRuntime(ipcMain2) {
       const fs10 = await import("fs");
       const content = fs10.readFileSync(input.path, "utf8");
       return { success: true, content };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain2.handle("agent/voiceTTS", async (_event, input) => {
+    try {
+      const key = await getElevenLabsKey();
+      if (!key) {
+        return { success: false, error: 'Missing ELEVENLABS_API_KEY (or keys.md entry: "eleven labs key:")' };
+      }
+      const voiceId = (input.voiceId || "21m00Tcm4TlvDq8ikWAM").trim();
+      const modelId = (input.modelId || "eleven_multilingual_v2").trim();
+      const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`;
+      const r = await fetch(url, {
+        method: "POST",
+        headers: {
+          "xi-api-key": key,
+          "Content-Type": "application/json",
+          "Accept": "audio/mpeg"
+        },
+        body: JSON.stringify({ text: input.text || "", model_id: modelId })
+      });
+      if (!r.ok) {
+        const msg = await r.text().catch(() => "");
+        return { success: false, error: `TTS error ${r.status}: ${msg.slice(0, 200)}` };
+      }
+      const buf = Buffer.from(await r.arrayBuffer());
+      const b64 = buf.toString("base64");
+      return { success: true, audioBase64: b64, format: "mp3" };
     } catch (error) {
       return { success: false, error: error.message };
     }

@@ -6,6 +6,8 @@ import { ChatMessageBubble, type ChatMessage as V0ChatMessage } from '@/componen
 import { LogsViewer, eventToLogEntry } from '@/components/logs-viewer'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
+// Lightweight tabs helper imported but not currently used; kept for future tab refactor
+// import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { quickSearch } from '@/agent/web'
 
 type AgentPayload = {
@@ -36,7 +38,9 @@ export default function App() {
   const [showLinkCards, setShowLinkCards] = useState<boolean>(true)
   const [searchEnabled, setSearchEnabled] = useState<boolean>(true)
   const [showThinking, setShowThinking] = useState<boolean>(true)
-  const [activeTab, setActiveTab] = useState<'chat' | 'logs'>('chat')
+  const [activeTab, setActiveTab] = useState<'chat' | 'voice' | 'logs'>('chat')
+  const [voiceBusy, setVoiceBusy] = useState<boolean>(false)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
   const [remoteMode] = useState<boolean>(false)
   const [remoteBase] = useState<string>('')
   const [remoteToken] = useState<string>('')
@@ -541,29 +545,9 @@ export default function App() {
           
           {/* Tabs */}
           <div className="flex border-t border-white/10">
-            <button
-              onClick={() => setActiveTab('chat')}
-              className={`flex-1 px-4 py-2 text-sm font-medium transition ${
-                activeTab === 'chat'
-                  ? 'text-white bg-white/5 border-b-2 border-purple-400'
-                  : 'text-white/60 hover:text-white/80 hover:bg-white/5'
-              }`}
-            >
-              Chat
-            </button>
-            <button
-              onClick={() => setActiveTab('logs')}
-              className={`flex-1 px-4 py-2 text-sm font-medium transition relative ${
-                activeTab === 'logs'
-                  ? 'text-white bg-white/5 border-b-2 border-purple-400'
-                  : 'text-white/60 hover:text-white/80 hover:bg-white/5'
-              }`}
-            >
-              Logs
-              {logs.length > 0 && (
-                <span className="absolute -top-1 -right-1 h-2 w-2 bg-blue-400 rounded-full"></span>
-              )}
-            </button>
+            <button onClick={() => setActiveTab('chat')} className={`flex-1 px-4 py-2 text-sm font-medium transition ${activeTab === 'chat' ? 'text-white bg-white/5 border-b-2 border-purple-400' : 'text-white/60 hover:text-white/80 hover:bg-white/5'}`}>Chat</button>
+            <button onClick={() => setActiveTab('voice')} className={`flex-1 px-4 py-2 text-sm font-medium transition ${activeTab === 'voice' ? 'text-white bg-white/5 border-b-2 border-purple-400' : 'text-white/60 hover:text-white/80 hover:bg-white/5'}`}>Voice</button>
+            <button onClick={() => setActiveTab('logs')} className={`flex-1 px-4 py-2 text-sm font-medium transition relative ${activeTab === 'logs' ? 'text-white bg-white/5 border-b-2 border-purple-400' : 'text-white/60 hover:text-white/80 hover:bg-white/5'}`}>Logs{logs.length > 0 && (<span className="absolute -top-1 -right-1 h-2 w-2 bg-blue-400 rounded-full"></span>)}</button>
           </div>
         </header>
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
@@ -629,12 +613,59 @@ export default function App() {
                 </div>
               </div>
             </>
+          ) : activeTab === 'voice' ? (
+            <div className="flex-1 flex flex-col items-center justify-center p-6">
+              <div className="w-full max-w-xl space-y-3">
+                <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="text-sm font-semibold text-white/90 mb-2">ElevenLabs Voice</div>
+                  <div className="text-xs text-white/60 mb-3">Type text and play with ElevenLabs TTS. Your key can be set via env ELEVENLABS_API_KEY or by placing it in `keys.md` as 'eleven labs key: ...'.</div>
+                  <VoicePanel playing={voiceBusy} onPlay={async (text) => {
+                    if (!text.trim()) return
+                    setVoiceBusy(true)
+                    try {
+                      const res = await (window as any).agent?.voiceTTS?.({ text })
+                      if (res?.success && res.audioBase64) {
+                        const src = `data:audio/mp3;base64,${res.audioBase64}`
+                        if (!audioRef.current) audioRef.current = new Audio()
+                        audioRef.current.src = src
+                        await audioRef.current.play()
+                      } else {
+                        alert(res?.error || 'TTS failed')
+                      }
+                    } catch (err) {
+                      alert(String(err))
+                    } finally {
+                      setVoiceBusy(false)
+                    }
+                  }} />
+                </div>
+              </div>
+            </div>
           ) : (
             <LogsViewer logs={logs} onClear={handleClearLogs} />
-            )}
+          )}
           </div>
       </SidebarInset>
     </SidebarProvider>
+  )
+}
+
+function VoicePanel({ playing, onPlay }: { playing: boolean; onPlay: (text: string) => Promise<void> }) {
+  const [text, setText] = useState<string>('Hello from Local Agent using ElevenLabs!')
+  return (
+    <div className="space-y-2">
+      <textarea
+        className="w-full h-28 rounded-lg bg-white/5 border border-white/10 p-2 text-white"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="Type something to speak..."
+      />
+      <div className="flex items-center justify-end gap-2">
+        <Button disabled={playing || !text.trim()} onClick={() => onPlay(text)}>
+          {playing ? 'Playing…' : 'Play'}
+        </Button>
+      </div>
+    </div>
   )
 }
 

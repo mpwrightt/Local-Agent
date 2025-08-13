@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('agent', {
     ipcRenderer.on('agent/event', listener)
     return () => ipcRenderer.removeListener('agent/event', listener)
   },
+  voiceTTS: (input: { text: string; voiceId?: string; modelId?: string }) => ipcRenderer.invoke('agent/voiceTTS', input),
 })
 
 declare global {
@@ -31,6 +32,7 @@ declare global {
       revealInFolder: (input: { path: string }) => Promise<void>
       readFileText: (input: { path: string }) => Promise<{ success: boolean; content?: string; error?: string }>
       onEvent: (handler: (event: any) => void) => () => void
+      voiceTTS: (input: { text: string; voiceId?: string; modelId?: string }) => Promise<{ success: boolean; audioBase64?: string; error?: string; format?: string }>
     }
   }
 }
