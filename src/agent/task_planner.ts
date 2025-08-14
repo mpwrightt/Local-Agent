@@ -701,6 +701,8 @@ ${automation ?
   'For research mode: Prioritize web research, data gathering, analysis, and report generation.'
 }
 
+Platform context: ${process.platform === 'win32' ? 'Windows PowerShell environment - use PowerShell commands like Get-ChildItem, Get-Location, etc.' : 'macOS/Unix environment - use standard Unix commands like ls, pwd, etc.'}
+
 Respond with valid JSON only, no other text.`
 
   const baseURL = process.env.LMSTUDIO_HOST ?? 'http://127.0.0.1:1234/v1'

@@ -31,7 +31,9 @@ function isWhitelisted(cmd: string): boolean {
     // macOS helpers
     'open', 'osascript', 'killall',
     // Windows helpers (PowerShell and cmd)
-    'Start-Process', 'Get-Process', 'Stop-Process', 'taskkill', 'cmd', 'powershell', 'Add-Type'
+    'Start-Process', 'Get-Process', 'Stop-Process', 'taskkill', 'cmd', 'powershell', 'Add-Type',
+    // Windows PowerShell equivalents
+    'Get-ChildItem', 'Get-Content', 'Set-Location', 'Get-Location', 'dir', 'type'
   ])
   return whitelist.has(first)
 }
@@ -42,7 +44,7 @@ export async function spawnShellAgent(ctx: Ctx) {
     throw new Error('No shell command provided')
   }
   let cmd = parsed.cmd
-  // Normalize simple app open/quit for Windows
+  // Normalize commands for Windows PowerShell
   if (process.platform === 'win32') {
     // open -a "App" → Start-Process "App"
     const openMatch = cmd.match(/^open\s+-a\s+"([^"]+)"/i)
@@ -56,6 +58,25 @@ export async function spawnShellAgent(ctx: Ctx) {
       const app = osaQuit[1].replace('"', '""')
       cmd = `Get-Process -Name \"${app}\" -ErrorAction SilentlyContinue | Stop-Process -Force`
     }
+    // ls → Get-ChildItem (PowerShell equivalent)
+    if (cmd.match(/^ls\b/)) {
+      cmd = cmd.replace(/^ls\b/, 'Get-ChildItem')
+      // Handle common ls options
+      cmd = cmd.replace(/\s+-la?\b/, ' | Format-Table Name, Mode, LastWriteTime, Length -AutoSize')
+      cmd = cmd.replace(/\s+-l\b/, ' | Format-Table Name, Mode, LastWriteTime, Length -AutoSize')
+      cmd = cmd.replace(/\s+-a\b/, ' -Force')
+    }
+    // pwd → Get-Location
+    if (cmd.match(/^pwd\b/)) {
+      cmd = cmd.replace(/^pwd\b/, 'Get-Location')
+    }
+    // cat → Get-Content
+    if (cmd.match(/^cat\b/)) {
+      cmd = cmd.replace(/^cat\b/, 'Get-Content')
+    }
+    // Handle desktop path specifically
+    cmd = cmd.replace(/\$HOME\/Desktop/g, '$env:USERPROFILE\\Desktop')
+    cmd = cmd.replace(/~\/Desktop/g, '$env:USERPROFILE\\Desktop')
   }
   const meta = parsed.meta
   const whitelisted = isWhitelisted(cmd)

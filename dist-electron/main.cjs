@@ -2193,7 +2193,14 @@ function isWhitelisted(cmd) {
     "taskkill",
     "cmd",
     "powershell",
-    "Add-Type"
+    "Add-Type",
+    // Windows PowerShell equivalents
+    "Get-ChildItem",
+    "Get-Content",
+    "Set-Location",
+    "Get-Location",
+    "dir",
+    "type"
   ]);
   return whitelist.has(first);
 }
@@ -2214,6 +2221,20 @@ async function spawnShellAgent(ctx) {
       const app2 = osaQuit[1].replace('"', '""');
       cmd = `Get-Process -Name "${app2}" -ErrorAction SilentlyContinue | Stop-Process -Force`;
     }
+    if (cmd.match(/^ls\b/)) {
+      cmd = cmd.replace(/^ls\b/, "Get-ChildItem");
+      cmd = cmd.replace(/\s+-la?\b/, " | Format-Table Name, Mode, LastWriteTime, Length -AutoSize");
+      cmd = cmd.replace(/\s+-l\b/, " | Format-Table Name, Mode, LastWriteTime, Length -AutoSize");
+      cmd = cmd.replace(/\s+-a\b/, " -Force");
+    }
+    if (cmd.match(/^pwd\b/)) {
+      cmd = cmd.replace(/^pwd\b/, "Get-Location");
+    }
+    if (cmd.match(/^cat\b/)) {
+      cmd = cmd.replace(/^cat\b/, "Get-Content");
+    }
+    cmd = cmd.replace(/\$HOME\/Desktop/g, "$env:USERPROFILE\\Desktop");
+    cmd = cmd.replace(/~\/Desktop/g, "$env:USERPROFILE\\Desktop");
   }
   const meta = parsed.meta;
   const whitelisted = isWhitelisted(cmd);
@@ -2958,6 +2979,8 @@ ${automation ? "TASK MODE" : "RESEARCH MODE"}: Focus on ${taskFocus}.
 Use roles: ${preferredRoles}. Prefer reversible steps first.
 
 ${automation ? "For task mode: Prioritize direct actions like file operations, shell commands, opening apps, browser automation." : "For research mode: Prioritize web research, data gathering, analysis, and report generation."}
+
+Platform context: ${process.platform === "win32" ? "Windows PowerShell environment - use PowerShell commands like Get-ChildItem, Get-Location, etc." : "macOS/Unix environment - use standard Unix commands like ls, pwd, etc."}
 
 Respond with valid JSON only, no other text.`;
   const baseURL = process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
