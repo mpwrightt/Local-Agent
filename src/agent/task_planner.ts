@@ -788,17 +788,22 @@ Respond with valid JSON only, no other text.`
         }
       } catch {}
     } else {
-      try {
-        const resp = await client.chat.completions.create({
-          model: modelName,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: prompt },
-          ],
-          temperature: 0.2,
-          max_tokens: 300,
-        })
-        textFromLLM = String(resp?.choices?.[0]?.message?.content ?? '')
+        try {
+    console.log(`[TaskPlanner] Planning for: "${prompt}"`)
+    console.log(`[TaskPlanner] Platform: ${process.platform}`)
+    console.log(`[TaskPlanner] Automation: ${automation}`)
+    
+    const resp = await client.chat.completions.create({
+      model: modelName,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.2,
+      max_tokens: 300,
+    })
+    textFromLLM = String(resp?.choices?.[0]?.message?.content ?? '')
+    console.log(`[TaskPlanner] LLM response: ${textFromLLM.slice(0, 200)}...`)
       } catch {}
     }
   }
@@ -809,19 +814,23 @@ Respond with valid JSON only, no other text.`
     const maybeArray = Array.isArray(parsed) ? parsed : parsed.tasks
     tasks = z.array(TaskSchema).parse(maybeArray)
   } catch (e) {
+    console.log(`[TaskPlanner] JSON parse failed, using fallback:`, e)
     // Robust fallback plan based on mode
     if (automation) {
       // Tasks mode fallback - focus on direct actions
       // Smarter fallback for listing/searching on known scopes
       const p = prompt.toLowerCase()
+      console.log(`[TaskPlanner] Analyzing prompt: "${p}"`)
       const scopeMatch = p.match(/\b(desktop|documents|downloads|pictures)\b/)
       const scope = scopeMatch ? scopeMatch[1] : 'any'
       const isList = /\b(list|show)\b/.test(p)
       const wantsFolders = /\bfolders?|directories\b/.test(p)
       const wantsFiles = /\bfiles?\b/.test(p)
+      console.log(`[TaskPlanner] Parsed: scope=${scope}, isList=${isList}, wantsFolders=${wantsFolders}, wantsFiles=${wantsFiles}`)
       if (isList && (wantsFolders || wantsFiles)) {
         const payload = { op: 'locate', name: '*', scope, listType: wantsFolders ? 'folders' : 'files' }
         tasks = [ { id: 'locate', title: `List ${wantsFolders ? 'folders' : 'files'}`, description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} } ]
+        console.log(`[TaskPlanner] Created fallback task:`, tasks[0])
       } else if (p.includes('folder') || p.includes('file')) {
         const payload = { op: 'locate', name: '*', scope }
         tasks = [ { id: 'locate', title: 'Search for file/folder', description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} } ]

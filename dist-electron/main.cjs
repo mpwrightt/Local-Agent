@@ -1927,10 +1927,28 @@ async function spawnFileOpsAgent(ctx) {
         if (process.platform === "darwin") {
           if (!listType) {
             const cmd = `mdfind -name ${JSON.stringify(name)}`;
+            console.log(`[FileOps] macOS search command: ${cmd}`);
             out = execSync(cmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
           }
         } else if (process.platform === "win32") {
-          if (!listType) {
+          console.log(`[FileOps] Windows search - name: "${name}", listType: "${listType}", scope: "${scope}"`);
+          if (listType === "folders" && name === "*") {
+            const targetScope = scope === "any" ? "desktop" : scope;
+            const targetPath = scopes[targetScope] || scopes.desktop;
+            console.log(`[FileOps] Listing folders in: ${targetPath}`);
+            const ps = `Get-ChildItem -LiteralPath "${targetPath}" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`;
+            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`;
+            console.log(`[FileOps] Windows folder listing command: ${fullCmd}`);
+            out = execSync(fullCmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+          } else if (listType === "files" && name === "*") {
+            const targetScope = scope === "any" ? "desktop" : scope;
+            const targetPath = scopes[targetScope] || scopes.desktop;
+            console.log(`[FileOps] Listing files in: ${targetPath}`);
+            const ps = `Get-ChildItem -LiteralPath "${targetPath}" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`;
+            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`;
+            console.log(`[FileOps] Windows file listing command: ${fullCmd}`);
+            out = execSync(fullCmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+          } else if (!listType) {
             const roots = [
               scopes.desktop,
               scopes.documents,
@@ -1938,7 +1956,9 @@ async function spawnFileOpsAgent(ctx) {
               scopes.pictures
             ].filter(Boolean).map((r) => r.replace(/`/g, "``").replace(/"/g, '``"'));
             const ps = `Get-ChildItem -LiteralPath ${roots.map((r) => `"${r}"`).join(",")} -Recurse -Depth 3 -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*${name.replace(/"/g, '""')}*" } | Select-Object -ExpandProperty FullName`;
-            out = execSync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`;
+            console.log(`[FileOps] Windows PowerShell search command: ${fullCmd}`);
+            out = execSync(fullCmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
           }
         }
         if (out) {
@@ -1952,7 +1972,9 @@ async function spawnFileOpsAgent(ctx) {
             if (candidates.length >= 50) break;
           }
         }
-      } catch {
+      } catch (error) {
+        console.log(`[FileOps] PowerShell execution failed:`, error);
+        db.addRunEvent(ctx.runId, { type: "error", taskId: ctx.task.id, message: `PowerShell search failed: ${error}` });
       }
       if (candidates.length === 0) {
         const dirs = scope === "any" ? Object.values(scopes) : [scopes[scope]].filter(Boolean);
@@ -3091,6 +3113,9 @@ Respond with valid JSON only, no other text.`;
       }
     } else {
       try {
+        console.log(`[TaskPlanner] Planning for: "${prompt}"`);
+        console.log(`[TaskPlanner] Platform: ${process.platform}`);
+        console.log(`[TaskPlanner] Automation: ${automation}`);
         const resp = await client.chat.completions.create({
           model: modelName,
           messages: [
@@ -3101,6 +3126,7 @@ Respond with valid JSON only, no other text.`;
           max_tokens: 300
         });
         textFromLLM = String(((_h = (_g = (_f = resp == null ? void 0 : resp.choices) == null ? void 0 : _f[0]) == null ? void 0 : _g.message) == null ? void 0 : _h.content) ?? "");
+        console.log(`[TaskPlanner] LLM response: ${textFromLLM.slice(0, 200)}...`);
       } catch {
       }
     }
@@ -3111,16 +3137,20 @@ Respond with valid JSON only, no other text.`;
     const maybeArray = Array.isArray(parsed) ? parsed : parsed.tasks;
     tasks = import_zod.z.array(TaskSchema).parse(maybeArray);
   } catch (e) {
+    console.log(`[TaskPlanner] JSON parse failed, using fallback:`, e);
     if (automation) {
       const p = prompt.toLowerCase();
+      console.log(`[TaskPlanner] Analyzing prompt: "${p}"`);
       const scopeMatch = p.match(/\b(desktop|documents|downloads|pictures)\b/);
       const scope = scopeMatch ? scopeMatch[1] : "any";
       const isList = /\b(list|show)\b/.test(p);
       const wantsFolders = /\bfolders?|directories\b/.test(p);
       const wantsFiles = /\bfiles?\b/.test(p);
+      console.log(`[TaskPlanner] Parsed: scope=${scope}, isList=${isList}, wantsFolders=${wantsFolders}, wantsFiles=${wantsFiles}`);
       if (isList && (wantsFolders || wantsFiles)) {
         const payload = { op: "locate", name: "*", scope, listType: wantsFolders ? "folders" : "files" };
         tasks = [{ id: "locate", title: `List ${wantsFolders ? "folders" : "files"}`, description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }];
+        console.log(`[TaskPlanner] Created fallback task:`, tasks[0]);
       } else if (p.includes("folder") || p.includes("file")) {
         const payload = { op: "locate", name: "*", scope };
         tasks = [{ id: "locate", title: "Search for file/folder", description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }];

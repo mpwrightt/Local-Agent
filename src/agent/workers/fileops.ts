@@ -127,16 +127,39 @@ export async function spawnFileOpsAgent(ctx: Ctx) {
         if (process.platform === 'darwin') {
           if (!listType) {
             const cmd = `mdfind -name ${JSON.stringify(name)}`
+            console.log(`[FileOps] macOS search command: ${cmd}`)
             out = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
           }
         } else if (process.platform === 'win32') {
-          if (!listType) {
+          console.log(`[FileOps] Windows search - name: "${name}", listType: "${listType}", scope: "${scope}"`)
+          // Handle folder listing specifically
+          if (listType === 'folders' && name === '*') {
+            // List folders in the specified scope
+            const targetScope = scope === 'any' ? 'desktop' : scope
+            const targetPath = scopes[targetScope] || scopes.desktop
+            console.log(`[FileOps] Listing folders in: ${targetPath}`)
+            const ps = `Get-ChildItem -LiteralPath \"${targetPath}\" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`
+            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`
+            console.log(`[FileOps] Windows folder listing command: ${fullCmd}`)
+            out = execSync(fullCmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+          } else if (listType === 'files' && name === '*') {
+            // List files in the specified scope  
+            const targetScope = scope === 'any' ? 'desktop' : scope
+            const targetPath = scopes[targetScope] || scopes.desktop
+            console.log(`[FileOps] Listing files in: ${targetPath}`)
+            const ps = `Get-ChildItem -LiteralPath \"${targetPath}\" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`
+            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`
+            console.log(`[FileOps] Windows file listing command: ${fullCmd}`)
+            out = execSync(fullCmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+          } else if (!listType) {
             // PowerShell: search common libraries recursively (limited depth for speed)
             const roots = [
               scopes.desktop, scopes.documents, scopes.downloads, scopes.pictures
             ].filter(Boolean).map(r => r.replace(/`/g, '``').replace(/"/g, '``"'))
             const ps = `Get-ChildItem -LiteralPath ${roots.map(r => `\"${r}\"`).join(',')} -Recurse -Depth 3 -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like \"*${name.replace(/"/g, '""')}*\" } | Select-Object -ExpandProperty FullName`
-            out = execSync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`
+            console.log(`[FileOps] Windows PowerShell search command: ${fullCmd}`)
+            out = execSync(fullCmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
           }
         }
         if (out) {
@@ -150,7 +173,10 @@ export async function spawnFileOpsAgent(ctx: Ctx) {
             if (candidates.length >= 50) break
           }
         }
-      } catch {}
+      } catch (error) {
+        console.log(`[FileOps] PowerShell execution failed:`, error)
+        db.addRunEvent(ctx.runId, { type: 'error', taskId: ctx.task.id, message: `PowerShell search failed: ${error}` })
+      }
       
       // 2) Scoped directory fallback scan (shallow)
       if (candidates.length === 0) {
