@@ -575,6 +575,9 @@ export default function App() {
           temperature: reasoningLevel === 'high' ? 0.9 : reasoningLevel === 'low' ? 0.3 : 0.7,
           reasoningLevel,
           searchEnabled,
+          showThinking,
+          answerId,
+          thinkingId,
           ...(modelName.startsWith('ollama:') ? { maxTokens: ollamaParams.max_tokens, topP: ollamaParams.top_p } : {}),
         } as any)
         if (typeof unsub === 'function') unsub()

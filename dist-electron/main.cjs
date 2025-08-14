@@ -2395,8 +2395,7 @@ async function routeIntentLLM(prompt, model) {
         ],
         temperature: 0.1,
         max_tokens: 300,
-        response_format: { type: "json_object" },
-        reasoning: { effort: "medium" }
+        reasoning_effort: "medium"
       };
       const r = await fetch(baseURL.replace(/\/$/, "") + "/chat/completions", {
         method: "POST",
@@ -3015,8 +3014,7 @@ Respond with valid JSON only, no other text.`;
           { role: "user", content: prompt }
         ],
         temperature: 0.2,
-        max_tokens: 300,
-        response_format: { type: "json_object" }
+        max_tokens: 300
       });
       textFromLLM = String(((_d = (_c = (_b = resp == null ? void 0 : resp.choices) == null ? void 0 : _b[0]) == null ? void 0 : _c.message) == null ? void 0 : _d.content) ?? "");
     }
@@ -3767,9 +3765,16 @@ var LMClient = class {
     });
     if (opts == null ? void 0 : opts.reasoningEffort) {
       console.log(`[LMClient] Response status:`, r.status);
-      const responseClone = r.clone();
-      const responseData = await responseClone.json();
-      console.log(`[LMClient] Response reasoning_content length:`, ((_d = (_c = (_b = (_a = responseData == null ? void 0 : responseData.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.reasoning_content) == null ? void 0 : _d.length) || 0);
+      console.log(`[LMClient] Response is streaming:`, opts.stream);
+      if (!opts.stream && r.ok) {
+        try {
+          const responseClone = r.clone();
+          const responseData = await responseClone.json();
+          console.log(`[LMClient] Response reasoning_content length:`, ((_d = (_c = (_b = (_a = responseData == null ? void 0 : responseData.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.reasoning_content) == null ? void 0 : _d.length) || 0);
+        } catch (e) {
+          console.log(`[LMClient] Could not parse response as JSON (this is normal for streaming)`);
+        }
+      }
     }
     return r;
   }
@@ -4352,10 +4357,24 @@ ${reasoningHint}` };
         };
       }
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+      const baseURL = process.env.LM_GATEWAY_URL ?? process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
+      let userFriendlyMessage = `Sorry, I encountered an error connecting to LM Studio at ${baseURL}.`;
+      if (errorMessage.includes("fetch")) {
+        userFriendlyMessage += " Please make sure LM Studio is running and the local server is started.";
+      } else if (errorMessage.includes("json_object")) {
+        userFriendlyMessage += " There was an API compatibility issue that should now be fixed.";
+      } else if (errorMessage.includes("response_format")) {
+        userFriendlyMessage += " There was an API format issue that should now be fixed.";
+      } else if (errorMessage.includes("ECONNREFUSED")) {
+        userFriendlyMessage += " Connection refused - please start LM Studio and enable the local server.";
+      } else {
+        userFriendlyMessage += ` Error details: ${errorMessage}`;
+      }
       return {
         success: false,
-        error: error instanceof Error ? error.message : "Unknown error occurred",
-        content: `Sorry, I encountered an error connecting to LM Studio. Please make sure LM Studio is running and the local server is started on ${process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234"}`
+        error: errorMessage,
+        content: userFriendlyMessage
       };
     }
   });

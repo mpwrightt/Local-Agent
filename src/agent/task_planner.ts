@@ -94,8 +94,7 @@ async function routeIntentLLM(prompt: string, model: string): Promise<null | {
         ],
         temperature: 0.1,
         max_tokens: 300,
-        response_format: { type: 'json_object' },
-        reasoning: { effort: 'medium' }
+        reasoning_effort: 'medium'
       }
       const r = await fetch(baseURL.replace(/\/$/, '') + '/chat/completions', {
         method: 'POST',
@@ -759,7 +758,6 @@ Respond with valid JSON only, no other text.`
         ],
         temperature: 0.2,
         max_tokens: 300,
-        response_format: { type: 'json_object' },
       })
       textFromLLM = String(resp?.choices?.[0]?.message?.content ?? '')
     }

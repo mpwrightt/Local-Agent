@@ -56,9 +56,17 @@ class LMClient {
     
     if (opts?.reasoningEffort) {
       console.log(`[LMClient] Response status:`, r.status)
-      const responseClone = r.clone()
-      const responseData = await responseClone.json()
-      console.log(`[LMClient] Response reasoning_content length:`, responseData?.choices?.[0]?.message?.reasoning_content?.length || 0)
+      console.log(`[LMClient] Response is streaming:`, opts.stream)
+      // Only try to parse JSON for non-streaming responses
+      if (!opts.stream && r.ok) {
+        try {
+          const responseClone = r.clone()
+          const responseData = await responseClone.json()
+          console.log(`[LMClient] Response reasoning_content length:`, responseData?.choices?.[0]?.message?.reasoning_content?.length || 0)
+        } catch (e) {
+          console.log(`[LMClient] Could not parse response as JSON (this is normal for streaming)`)
+        }
+      }
     }
     return r
   }
@@ -679,10 +687,28 @@ export function createAgentRuntime(ipcMain: IpcMain) {
         }
       }
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+      const baseURL = process.env.LM_GATEWAY_URL ?? process.env.LMSTUDIO_HOST ?? 'http://127.0.0.1:1234/v1'
+      
+      // Provide more specific error messages based on the error type
+      let userFriendlyMessage = `Sorry, I encountered an error connecting to LM Studio at ${baseURL}.`
+      
+      if (errorMessage.includes('fetch')) {
+        userFriendlyMessage += ' Please make sure LM Studio is running and the local server is started.'
+      } else if (errorMessage.includes('json_object')) {
+        userFriendlyMessage += ' There was an API compatibility issue that should now be fixed.'
+      } else if (errorMessage.includes('response_format')) {
+        userFriendlyMessage += ' There was an API format issue that should now be fixed.'
+      } else if (errorMessage.includes('ECONNREFUSED')) {
+        userFriendlyMessage += ' Connection refused - please start LM Studio and enable the local server.'
+      } else {
+        userFriendlyMessage += ` Error details: ${errorMessage}`
+      }
+      
       return { 
         success: false, 
-        error: error instanceof Error ? error.message : 'Unknown error occurred',
-        content: `Sorry, I encountered an error connecting to LM Studio. Please make sure LM Studio is running and the local server is started on ${process.env.LMSTUDIO_HOST ?? 'http://127.0.0.1:1234'}`
+        error: errorMessage,
+        content: userFriendlyMessage
       }
     }
   })
