@@ -3745,7 +3745,7 @@ var LMClient = class {
       temperature: (opts == null ? void 0 : opts.temperature) ?? 0.7,
       stream: Boolean(opts == null ? void 0 : opts.stream)
     };
-    if (opts == null ? void 0 : opts.reasoningEffort) {
+    if ((opts == null ? void 0 : opts.reasoningEffort) && process.env.LM_DISABLE_REASONING !== "1") {
       body.reasoning_effort = opts.reasoningEffort;
       console.log(`[LMClient] Sending reasoning effort: ${opts.reasoningEffort}`);
       console.log(`[LMClient] Direct to LM Studio - no proxy`);
@@ -3759,7 +3759,10 @@ var LMClient = class {
     }
     const r = await fetch(this.baseURL.replace(/\/$/, "") + "/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...process.env.LMSTUDIO_AUTH ? { "Authorization": process.env.LMSTUDIO_AUTH } : {}
+      },
       body: JSON.stringify(body)
     });
     if (opts == null ? void 0 : opts.reasoningEffort) {
@@ -4104,7 +4107,7 @@ Reasoning Effort: ${rl}`;
       const systemIdx = guardedMessages.findIndex((m) => m.role === "system");
       if (systemIdx >= 0) guardedMessages[systemIdx] = { role: "system", content: guardedMessages[systemIdx].content + `
 ${reasoningHint}` };
-      const doStream = input.stream !== false;
+      const doStream = input.stream !== false && process.env.LM_DISABLE_STREAM !== "1";
       if (typeof modelName === "string" && modelName.startsWith("ollama:")) {
         try {
           const base = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");

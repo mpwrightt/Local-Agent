@@ -28,7 +28,7 @@ class LMClient {
       temperature: opts?.temperature ?? 0.7,
       stream: Boolean(opts?.stream)
     }
-    if (opts?.reasoningEffort) {
+    if (opts?.reasoningEffort && process.env.LM_DISABLE_REASONING !== '1') {
       // Use ONLY the format that worked in direct curl tests
       body.reasoning_effort = opts.reasoningEffort
       
@@ -47,7 +47,10 @@ class LMClient {
     
     const r = await fetch(this.baseURL.replace(/\/$/, '') + '/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(process.env.LMSTUDIO_AUTH ? { 'Authorization': process.env.LMSTUDIO_AUTH } : {})
+      },
       body: JSON.stringify(body)
     })
     
@@ -428,8 +431,8 @@ export function createAgentRuntime(ipcMain: IpcMain) {
       const systemIdx = guardedMessages.findIndex(m => m.role === 'system')
       if (systemIdx >= 0) guardedMessages[systemIdx] = { role: 'system', content: guardedMessages[systemIdx].content + `\n${reasoningHint}` }
 
-      // Streaming support: default ON for chat unless explicitly disabled
-      const doStream = (input as any).stream !== false
+      // Streaming support: default ON for chat unless explicitly disabled via input or env
+      const doStream = (input as any).stream !== false && process.env.LM_DISABLE_STREAM !== '1'
       // Ollama path (supports streaming)
       if (typeof modelName === 'string' && modelName.startsWith('ollama:')) {
         try {
