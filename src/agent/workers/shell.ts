@@ -33,7 +33,9 @@ function isWhitelisted(cmd: string): boolean {
     // Windows helpers (PowerShell and cmd)
     'Start-Process', 'Get-Process', 'Stop-Process', 'taskkill', 'cmd', 'powershell', 'Add-Type',
     // Windows PowerShell equivalents
-    'Get-ChildItem', 'Get-Content', 'Set-Location', 'Get-Location', 'dir', 'type'
+    'Get-ChildItem', 'Get-Content', 'Set-Location', 'Get-Location', 'dir', 'type',
+    // cmd.exe equivalents  
+    'cd', 'md', 'rd', 'copy', 'move', 'del'
   ])
   return whitelist.has(first)
 }
@@ -58,13 +60,19 @@ export async function spawnShellAgent(ctx: Ctx) {
       const app = osaQuit[1].replace('"', '""')
       cmd = `Get-Process -Name \"${app}\" -ErrorAction SilentlyContinue | Stop-Process -Force`
     }
-    // ls → Get-ChildItem (PowerShell equivalent)
+    // ls → Get-ChildItem (PowerShell equivalent) or fallback to dir
     if (cmd.match(/^ls\b/)) {
-      cmd = cmd.replace(/^ls\b/, 'Get-ChildItem')
-      // Handle common ls options
-      cmd = cmd.replace(/\s+-la?\b/, ' | Format-Table Name, Mode, LastWriteTime, Length -AutoSize')
-      cmd = cmd.replace(/\s+-l\b/, ' | Format-Table Name, Mode, LastWriteTime, Length -AutoSize')
-      cmd = cmd.replace(/\s+-a\b/, ' -Force')
+      // Try PowerShell first, but provide a simpler fallback
+      if (cmd.includes('Desktop') || cmd.includes('desktop')) {
+        // For desktop listing, use a simple approach
+        cmd = cmd.replace(/^ls\b.*/, 'Get-ChildItem "$env:USERPROFILE\\Desktop" | Select-Object Name, Mode, LastWriteTime, Length | Format-Table -AutoSize')
+      } else {
+        cmd = cmd.replace(/^ls\b/, 'Get-ChildItem')
+        // Handle common ls options
+        cmd = cmd.replace(/\s+-la?\b/, ' | Format-Table Name, Mode, LastWriteTime, Length -AutoSize')
+        cmd = cmd.replace(/\s+-l\b/, ' | Format-Table Name, Mode, LastWriteTime, Length -AutoSize')
+        cmd = cmd.replace(/\s+-a\b/, ' -Force')
+      }
     }
     // pwd → Get-Location
     if (cmd.match(/^pwd\b/)) {
@@ -75,8 +83,19 @@ export async function spawnShellAgent(ctx: Ctx) {
       cmd = cmd.replace(/^cat\b/, 'Get-Content')
     }
     // Handle desktop path specifically
-    cmd = cmd.replace(/\$HOME\/Desktop/g, '$env:USERPROFILE\\Desktop')
-    cmd = cmd.replace(/~\/Desktop/g, '$env:USERPROFILE\\Desktop')
+    if (process.env.FORCE_CMD === '1') {
+      // cmd.exe equivalents
+      cmd = cmd.replace(/\$HOME\/Desktop/g, '%USERPROFILE%\\Desktop')
+      cmd = cmd.replace(/~\/Desktop/g, '%USERPROFILE%\\Desktop')
+      // Convert PowerShell commands to cmd equivalents
+      cmd = cmd.replace(/^Get-ChildItem\b.*/, 'dir "%USERPROFILE%\\Desktop"')
+      cmd = cmd.replace(/^Get-Location\b/, 'cd')
+      cmd = cmd.replace(/^Get-Content\b/, 'type')
+    } else {
+      // PowerShell paths
+      cmd = cmd.replace(/\$HOME\/Desktop/g, '$env:USERPROFILE\\Desktop')
+      cmd = cmd.replace(/~\/Desktop/g, '$env:USERPROFILE\\Desktop')
+    }
   }
   const meta = parsed.meta
   const whitelisted = isWhitelisted(cmd)
@@ -93,13 +112,22 @@ export async function spawnShellAgent(ctx: Ctx) {
     db.addRunEvent(ctx.runId, { type: 'dm_hint', taskId: ctx.task.id, to: meta.to, message: meta.message })
   }
   const shellBin = process.platform === 'win32'
-    ? 'powershell.exe'
+    ? (process.env.FORCE_CMD === '1' ? 'cmd.exe' : 'powershell.exe')
     : (process.env.SHELL || '/bin/zsh')
   const home = os.homedir()
+  
+  // Add debug logging for Windows
+  if (process.platform === 'win32') {
+    console.log(`[Shell] Windows command: ${cmd}`)
+    console.log(`[Shell] Shell binary: ${shellBin}`)
+    console.log(`[Shell] Home directory: ${home}`)
+  }
 
   return await new Promise<{ exitCode: number; stdout: string; stderr: string }>((resolve, reject) => {
     const args = process.platform === 'win32'
-      ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', cmd]
+      ? (shellBin === 'cmd.exe' 
+          ? ['/c', cmd] 
+          : ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', cmd])
       : ['-lc', cmd]
     const child = spawn(shellBin, args, { cwd: home, env: process.env })
     let out = ''

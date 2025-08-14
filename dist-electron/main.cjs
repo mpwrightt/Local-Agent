@@ -2200,7 +2200,14 @@ function isWhitelisted(cmd) {
     "Set-Location",
     "Get-Location",
     "dir",
-    "type"
+    "type",
+    // cmd.exe equivalents  
+    "cd",
+    "md",
+    "rd",
+    "copy",
+    "move",
+    "del"
   ]);
   return whitelist.has(first);
 }
@@ -2222,10 +2229,14 @@ async function spawnShellAgent(ctx) {
       cmd = `Get-Process -Name "${app2}" -ErrorAction SilentlyContinue | Stop-Process -Force`;
     }
     if (cmd.match(/^ls\b/)) {
-      cmd = cmd.replace(/^ls\b/, "Get-ChildItem");
-      cmd = cmd.replace(/\s+-la?\b/, " | Format-Table Name, Mode, LastWriteTime, Length -AutoSize");
-      cmd = cmd.replace(/\s+-l\b/, " | Format-Table Name, Mode, LastWriteTime, Length -AutoSize");
-      cmd = cmd.replace(/\s+-a\b/, " -Force");
+      if (cmd.includes("Desktop") || cmd.includes("desktop")) {
+        cmd = cmd.replace(/^ls\b.*/, 'Get-ChildItem "$env:USERPROFILE\\Desktop" | Select-Object Name, Mode, LastWriteTime, Length | Format-Table -AutoSize');
+      } else {
+        cmd = cmd.replace(/^ls\b/, "Get-ChildItem");
+        cmd = cmd.replace(/\s+-la?\b/, " | Format-Table Name, Mode, LastWriteTime, Length -AutoSize");
+        cmd = cmd.replace(/\s+-l\b/, " | Format-Table Name, Mode, LastWriteTime, Length -AutoSize");
+        cmd = cmd.replace(/\s+-a\b/, " -Force");
+      }
     }
     if (cmd.match(/^pwd\b/)) {
       cmd = cmd.replace(/^pwd\b/, "Get-Location");
@@ -2233,8 +2244,16 @@ async function spawnShellAgent(ctx) {
     if (cmd.match(/^cat\b/)) {
       cmd = cmd.replace(/^cat\b/, "Get-Content");
     }
-    cmd = cmd.replace(/\$HOME\/Desktop/g, "$env:USERPROFILE\\Desktop");
-    cmd = cmd.replace(/~\/Desktop/g, "$env:USERPROFILE\\Desktop");
+    if (process.env.FORCE_CMD === "1") {
+      cmd = cmd.replace(/\$HOME\/Desktop/g, "%USERPROFILE%\\Desktop");
+      cmd = cmd.replace(/~\/Desktop/g, "%USERPROFILE%\\Desktop");
+      cmd = cmd.replace(/^Get-ChildItem\b.*/, 'dir "%USERPROFILE%\\Desktop"');
+      cmd = cmd.replace(/^Get-Location\b/, "cd");
+      cmd = cmd.replace(/^Get-Content\b/, "type");
+    } else {
+      cmd = cmd.replace(/\$HOME\/Desktop/g, "$env:USERPROFILE\\Desktop");
+      cmd = cmd.replace(/~\/Desktop/g, "$env:USERPROFILE\\Desktop");
+    }
   }
   const meta = parsed.meta;
   const whitelisted = isWhitelisted(cmd);
@@ -2247,11 +2266,16 @@ async function spawnShellAgent(ctx) {
   if (meta && meta.kind === "slack_dm") {
     db.addRunEvent(ctx.runId, { type: "dm_hint", taskId: ctx.task.id, to: meta.to, message: meta.message });
   }
-  const shellBin = process.platform === "win32" ? "powershell.exe" : process.env.SHELL || "/bin/zsh";
+  const shellBin = process.platform === "win32" ? process.env.FORCE_CMD === "1" ? "cmd.exe" : "powershell.exe" : process.env.SHELL || "/bin/zsh";
   const home = import_node_os5.default.homedir();
+  if (process.platform === "win32") {
+    console.log(`[Shell] Windows command: ${cmd}`);
+    console.log(`[Shell] Shell binary: ${shellBin}`);
+    console.log(`[Shell] Home directory: ${home}`);
+  }
   return await new Promise((resolve, reject) => {
     var _a, _b;
-    const args = process.platform === "win32" ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd] : ["-lc", cmd];
+    const args = process.platform === "win32" ? shellBin === "cmd.exe" ? ["/c", cmd] : ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd] : ["-lc", cmd];
     const child = (0, import_node_child_process2.spawn)(shellBin, args, { cwd: home, env: process.env });
     let out = "";
     let err = "";
