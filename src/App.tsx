@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
+import { VisualizerSwitcher } from '@/components/voice/VisualizerSwitcher'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { AppSidebar } from '@/components/app-sidebar'
 import { ChatInput, type AgentMode } from '@/components/chat-input'
@@ -6,10 +7,7 @@ import { ChatMessageBubble, type ChatMessage as V0ChatMessage } from '@/componen
 import { LogsViewer, eventToLogEntry } from '@/components/logs-viewer'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
-// Lightweight tabs helper imported but not currently used; kept for future tab refactor
-// import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { quickSearch } from '@/agent/web'
-import { BlobVisualizer } from '@/components/voice/BlobVisualizer'
 
 type AgentPayload = {
   type?: string
@@ -33,9 +31,21 @@ type Conversation = {
 
 export default function App() {
   const [status, setStatus] = useState<'Idle' | 'Listening' | 'Thinking' | 'Executing'>('Idle')
-  const [modelName] = useState<string>('modelqmxfp4')
+  const [modelName, setModelName] = useState<string>('openai/gpt-oss-20b')
+  const [availableModels, setAvailableModels] = useState<string[]>([])
   const [agentMode, setAgentMode] = useState<AgentMode>('chat')
   const [reasoningLevel, setReasoningLevel] = useState<'low' | 'medium' | 'high'>('medium')
+  const [ollamaParams, setOllamaParams] = useState<{ temperature?: number; top_p?: number; presence_penalty?: number; frequency_penalty?: number; max_tokens?: number }>({})
+  
+  // Debug logging for reasoning level changes
+  const debugSetReasoningLevel = (level: 'low' | 'medium' | 'high') => {
+    console.log(`[Debug] Reasoning level changing to ${level}`)
+    setReasoningLevel(level)
+    // Verify the change took effect
+    setTimeout(() => {
+      console.log(`[Debug] Reasoning level is now: ${level}`)
+    }, 100)
+  }
   const [showLinkCards, setShowLinkCards] = useState<boolean>(true)
   const [searchEnabled, setSearchEnabled] = useState<boolean>(true)
   const [showThinking, setShowThinking] = useState<boolean>(true)
@@ -48,6 +58,25 @@ export default function App() {
   const [remoteBase] = useState<string>('')
   const [remoteToken] = useState<string>('')
   const [logs, setLogs] = useState<Array<ReturnType<typeof eventToLogEntry>>>([])
+  // Load models list from bridge (LM Studio and Ollama)
+  useEffect(() => {
+    (async () => {
+      try {
+        const agent = (window as any).agent
+        const list = await agent?.listModels?.()
+        if (Array.isArray(list) && list.length) setAvailableModels(list)
+        const def = await agent?.getDefaultModel?.()
+        if (def && typeof def.model === 'string' && def.model.trim()) setModelName(def.model)
+      } catch {}
+    })()
+  }, [])
+  async function refreshModels() {
+    try {
+      const agent = (window as any).agent
+      const list = await agent?.listModels?.()
+      if (Array.isArray(list) && list.length) setAvailableModels(list)
+    } catch {}
+  }
   const [currentRunId, setCurrentRunId] = useState<string | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([
     { id: 'conv-1', title: 'New chat', preview: '', messages: [] },
@@ -92,6 +121,19 @@ export default function App() {
           : c,
       ),
     )
+    // Auto-scroll to bottom after message append (next tick to allow DOM render)
+    try {
+      setTimeout(() => {
+        const root = document.getElementById('chat-scroll-root')
+        if (!root) return
+        const scroller = root.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null
+        if (scroller) {
+          scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' })
+        } else {
+          root.scrollIntoView({ behavior: 'smooth', block: 'end' })
+        }
+      }, 0)
+    } catch {}
   }
 
   async function handleFileAction(action: string, path: string) {
@@ -337,19 +379,41 @@ export default function App() {
           chatHistory.push({ role: 'user' as const, content: text })
           // Use Vite proxy in dev/preview to bypass CORS: /lm maps to 127.0.0.1:1234
           // In browser prod/dev, use the Vercel/Vite proxy at /lm; allow override via VITE_LMSTUDIO_HOST
-          const baseURL = (import.meta as any)?.env?.VITE_LMSTUDIO_HOST || '/lm/v1'
+          const baseURL = (import.meta as any)?.env?.VITE_LM_GATEWAY_URL || (import.meta as any)?.env?.VITE_LMSTUDIO_HOST || '/lm/v1'
           const temperature = reasoningLevel === 'high' ? 0.9 : reasoningLevel === 'low' ? 0.3 : 0.7
+          
+          // Debug logging for reasoning effort
+          console.log(`[Browser Chat] Reasoning level: ${reasoningLevel}`)
+          const requestBody = { 
+            model: modelName, 
+            messages: chatHistory, 
+            temperature, 
+            reasoning_effort: reasoningLevel  // ONLY use the format that worked in curl tests
+          }
+          console.log('[Browser Chat] Request body with reasoning_effort:', JSON.stringify(requestBody, null, 2))
+          
           const resp = await fetch(baseURL.replace(/\/$/, '') + '/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: modelName, messages: chatHistory, temperature })
+            body: JSON.stringify(requestBody)
           })
           let content = 'Error contacting LM Studio'
+          let thinkingContent = ''
           if (resp.ok) {
             const data: any = await resp.json()
             content = data?.choices?.[0]?.message?.content || content
+            thinkingContent = data?.choices?.[0]?.message?.reasoning_content || ''
+            
+            // Debug logging to see what we got from LM Studio
+            console.log('[Browser Chat] Response content:', content)
+            console.log('[Browser Chat] Reasoning content:', thinkingContent)
           }
           const links = searchEnabled ? await quickSearch(text, 3) : []
+          
+          // Add thinking content if available and showThinking is enabled
+          if (showThinking && thinkingContent) {
+            appendMessage({ id: `think:${Date.now()}`, role: 'ai', type: 'thinking', content: thinkingContent })
+          }
           appendMessage({ id: `ai:${Date.now()}`, role: 'ai', type: 'text', content, ...(showLinkCards && links.length ? { links } as any : {}) })
         } catch (err) {
           appendMessage({ id: `error:${Date.now()}`, role: 'ai', type: 'text', content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` })
@@ -371,14 +435,38 @@ export default function App() {
             .slice(-10)
             .map(m => ({ role: m.role === 'ai' ? 'assistant' as const : 'user' as const, content: m.content || '' }))
           history.push({ role: 'user' as const, content: text })
-          const resp = await fetch(((import.meta as any)?.env?.VITE_LMSTUDIO_HOST || '/lm/v1').replace(/\/$/, '') + '/chat/completions', {
+          
+          // Debug logging for remote chat reasoning effort
+          console.log(`[Remote Chat] Reasoning level: ${reasoningLevel}`)
+          const remoteRequestBody = { 
+            model: modelName, 
+            messages: history, 
+            reasoning_effort: reasoningLevel  // ONLY use the format that worked in curl tests
+          }
+          console.log('[Remote Chat] Request body:', remoteRequestBody)
+          
+          const resp = await fetch((((import.meta as any)?.env?.VITE_LM_GATEWAY_URL) || (import.meta as any)?.env?.VITE_LMSTUDIO_HOST || '/lm/v1').replace(/\/$/, '') + '/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: modelName, messages: history })
+            body: JSON.stringify(remoteRequestBody)
           })
           let content = 'Error contacting LM Studio'
-          if (resp.ok) { const data: any = await resp.json(); content = data?.choices?.[0]?.message?.content || content }
+          let thinkingContent = ''
+          if (resp.ok) { 
+            const data: any = await resp.json()
+            content = data?.choices?.[0]?.message?.content || content
+            thinkingContent = data?.choices?.[0]?.message?.reasoning_content || ''
+            
+            // Debug logging for remote chat
+            console.log('[Remote Chat] Response content:', content)
+            console.log('[Remote Chat] Reasoning content:', thinkingContent)
+          }
           const links = searchEnabled ? await quickSearch(text, 3) : []
+          
+          // Add thinking content if available and showThinking is enabled
+          if (showThinking && thinkingContent) {
+            appendMessage({ id: `think:${Date.now()}`, role: 'ai', type: 'thinking', content: thinkingContent })
+          }
           appendMessage({ id: `ai:${Date.now()}`, role: 'ai', type: 'text', content, ...(showLinkCards && links.length ? { links } as any : {}) })
           setStatus('Idle')
           return
@@ -457,28 +545,47 @@ export default function App() {
         
         chatHistory.push({ role: 'user', content: processedText })
         
+        // Prepare streaming placeholders ids
+        const answerId = `ai:${Date.now()}`
+        const thinkingId = `think:${Date.now()}`
+        if (showThinking) {
+          appendMessage({ id: thinkingId, role: 'ai', type: 'thinking', content: '' })
+        }
+        appendMessage({ id: answerId, role: 'ai', type: 'text', content: '' })
+        const unsub = agentAny!.onEvent?.((e: any) => {
+          const p = e?.payload || e
+          if (!p) return
+          if (p.type === 'stream_answer' && p.id === answerId) {
+            // Replace last message content for this id
+            setConversations(prev => prev.map(c => c.id !== activeId ? c : ({
+              ...c,
+              messages: c.messages.map(m => m.id === answerId ? { ...m, content: p.content || '' } as any : m)
+            })))
+          }
+          if (p.type === 'stream_thinking' && p.id === thinkingId) {
+            setConversations(prev => prev.map(c => c.id !== activeId ? c : ({
+              ...c,
+              messages: c.messages.map(m => m.id === thinkingId ? { ...m, content: p.content || '' } as any : m)
+            })))
+          }
+        })
         const result = await agentAny!.simpleChat!({
           messages: chatHistory,
           model: modelName,
           temperature: reasoningLevel === 'high' ? 0.9 : reasoningLevel === 'low' ? 0.3 : 0.7,
           reasoningLevel,
           searchEnabled,
-        })
+          ...(modelName.startsWith('ollama:') ? { maxTokens: ollamaParams.max_tokens, topP: ollamaParams.top_p } : {}),
+        } as any)
+        if (typeof unsub === 'function') unsub()
         
         if (result.success) {
           const links = (result as any).links as Array<{ title: string; url: string; snippet?: string }> | undefined
-          const thinking = (result as any).thinking as string | undefined
-          if (showThinking && thinking && thinking.trim().length > 0) {
-            // Show dynamic thinking box first
-            appendMessage({ id: `think:${Date.now()}`, role: 'ai', type: 'thinking', content: thinking })
-          }
-          appendMessage({ 
-            id: `ai:${Date.now()}`, 
-            role: 'ai', 
-            type: 'text', 
-            content: result.content,
-            ...(showLinkCards && links?.length ? { links } : {}),
-          })
+          // finalize content (already streamed)
+          setConversations(prev => prev.map(c => c.id !== activeId ? c : ({
+            ...c,
+            messages: c.messages.map(m => m.id === answerId ? { ...m, content: result.content, ...(showLinkCards && links?.length ? { links } : {}) } as any : m)
+          })))
         } else {
           appendMessage({ 
             id: `error:${Date.now()}`, 
@@ -542,6 +649,44 @@ export default function App() {
               <span className="hidden md:inline text-[11px] text-white/50">Electron + Vite</span>
             </div>
             <div className="flex items-center gap-2">
+              <select
+                className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-white"
+                value={modelName}
+                onChange={(e) => {
+                  const m = e.target.value
+                  setModelName(m)
+                  try { (window as any).agent?.setDefaultModel?.({ model: m }) } catch {}
+                }}
+                onClick={() => { refreshModels().catch(() => {}) }}
+                title="LLM Model"
+              >
+                {[modelName, ...availableModels].filter((v, i, a) => v && a.indexOf(v) === i).map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              <Button variant="outline" size="sm" onClick={() => refreshModels()} title="Refresh models">↻</Button>
+              {modelName.startsWith('ollama:') && (
+                <div className="flex items-center gap-2 ml-2">
+                  <label className="text-[11px] text-white/60">Temp</label>
+                  <input type="number" step="0.05" min="0" max="1" className="w-16 text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-white"
+                    value={ollamaParams.temperature ?? ''}
+                    onChange={(e) => setOllamaParams(p => ({ ...p, temperature: e.target.value === '' ? undefined : Number(e.target.value) }))}
+                    title="Ollama temperature"
+                  />
+                  <label className="text-[11px] text-white/60">TopP</label>
+                  <input type="number" step="0.05" min="0" max="1" className="w-16 text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-white"
+                    value={ollamaParams.top_p ?? ''}
+                    onChange={(e) => setOllamaParams(p => ({ ...p, top_p: e.target.value === '' ? undefined : Number(e.target.value) }))}
+                    title="Ollama top_p"
+                  />
+                  <label className="text-[11px] text-white/60">MaxTok</label>
+                  <input type="number" step="1" min="1" className="w-16 text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-white"
+                    value={ollamaParams.max_tokens ?? ''}
+                    onChange={(e) => setOllamaParams(p => ({ ...p, max_tokens: e.target.value === '' ? undefined : Number(e.target.value) }))}
+                    title="Ollama max tokens"
+                  />
+                </div>
+              )}
               <Button variant="outline" size="sm" onClick={handleNewConversation}>New Chat</Button>
             </div>
           </div>
@@ -556,8 +701,8 @@ export default function App() {
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
           {activeTab === 'chat' ? (
             <>
-              <ScrollArea className="flex-1 min-h-0">
-                <div className="flex justify-center p-4">
+              <ScrollArea className="flex-1 min-h-0" onScrollCapture={() => {}}>
+                <div className="flex justify-center p-4" id="chat-scroll-root">
                   <div className="w-full max-w-3xl space-y-3">
                     {activeConversation.messages.length === 0 ? (
                       <div className="mx-auto mt-24 max-w-md rounded-xl border border-white/10 bg-white/5 p-5 text-center text-sm text-white/70">
@@ -605,7 +750,7 @@ export default function App() {
                 }
               }}
               reasoningLevel={reasoningLevel}
-              onReasoningLevelChange={setReasoningLevel}
+              onReasoningLevelChange={debugSetReasoningLevel}
               showLinkCards={showLinkCards}
               onShowLinkCardsChange={setShowLinkCards}
               showThinking={showThinking}
@@ -641,21 +786,46 @@ export default function App() {
                           const src = `data:audio/mp3;base64,${res.audioBase64}`
                           if (!audioRef.current) audioRef.current = new Audio()
                           audioRef.current.src = src
+                          ;(window as any).__localAgentAudioEl = audioRef.current
                           await audioRef.current.play()
                         }
                       } finally {
                         setVoiceBusy(false)
                       }
                     }}
-                    onUserQuery={async (query) => {
-                      await handleSend(query, { mode: 'chat' })
+                    onQueryNoChat={async (text) => {
+                      try {
+                        const agent = (window as any).agent
+                        if (!agent?.simpleChat) return
+                        const res = await agent.simpleChat({ 
+                          messages: [ { role: 'user', content: text } ],
+                          model: modelName,
+                          temperature: reasoningLevel === 'high' ? 0.9 : reasoningLevel === 'low' ? 0.3 : 0.7,
+                          reasoningLevel,
+                          searchEnabled,
+                          showThinking,
+                          maxTokens: 120
+                        })
+                        const content = res?.success ? (res.content || '') : ''
+                        if (content && content.trim()) {
+                          setVoiceBusy(true)
+                          try {
+                            const t = await agent.voiceTTS?.({ text: content, voiceId })
+                            if (t?.success && t.audioBase64) {
+                              const src = `data:audio/mp3;base64,${t.audioBase64}`
+                              if (!audioRef.current) audioRef.current = new Audio()
+                              audioRef.current.src = src
+                              ;(window as any).__localAgentAudioEl = audioRef.current
+                              await audioRef.current.play()
+                            }
+                          } finally {
+                            setVoiceBusy(false)
+                          }
+                        }
+                      } catch {}
                     }}
-                  >
-                    {/* Visualizer slot */}
-                    <div className="flex items-center justify-center my-4">
-                      <BlobVisualizer listening={!voiceBusy} speaking={voiceBusy} />
-                    </div>
-                  </VoiceDuplex>
+                    >
+                    </VoiceDuplex>
                 </div>
               </div>
             </div>
@@ -668,50 +838,111 @@ export default function App() {
   )
 }
 
-function VoiceDuplex({ busy, voiceId, onVoiceIdChange, voices, onLoadVoices, onSpeak, onUserQuery, children }: {
+function VoiceDuplex({ busy, voiceId, onVoiceIdChange, voices, onLoadVoices, onSpeak: _onSpeak, onQueryNoChat, onUserQuery: _onUserQuery, children }: {
   busy: boolean
   voiceId: string
   onVoiceIdChange: (id: string) => void
   voices: Array<{ id: string; name: string }>
   onLoadVoices: () => Promise<void>
   onSpeak: (text: string) => Promise<void>
-  onUserQuery: (text: string) => Promise<void>
+  onQueryNoChat: (text: string) => Promise<void>
+  onUserQuery?: (text: string) => Promise<void>
   children?: any
 }) {
   const [listening, setListening] = useState(false)
   const [interim, setInterim] = useState('')
   const recRef = useRef<any>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const chunksRef = useRef<BlobPart[]>([])
+  const mimeRef = useRef<string>('audio/webm')
   useEffect(() => { onLoadVoices().catch(() => {}) }, [])
   useEffect(() => {
     const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
-    if (!SR) return
-    const rec = new SR()
-    recRef.current = rec
-    rec.continuous = true
-    rec.interimResults = true
-    rec.lang = 'en-US'
-    rec.onresult = (e: any) => {
-      let final = ''
-      let interimLocal = ''
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const res = e.results[i]
-        if (res.isFinal) final += res[0].transcript
-        else interimLocal += res[0].transcript
+    if (SR) {
+      const rec = new SR()
+      recRef.current = rec
+      rec.continuous = true
+      rec.interimResults = true
+      rec.lang = 'en-US'
+      rec.onresult = (e: any) => {
+        let final = ''
+        let interimLocal = ''
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const res = e.results[i]
+          if (res.isFinal) final += res[0].transcript
+          else interimLocal += res[0].transcript
+        }
+        setInterim(interimLocal)
+        if (final.trim()) {
+          onQueryNoChat(final.trim())
+        }
       }
-      setInterim(interimLocal)
-      if (final.trim()) {
-        onUserQuery(final.trim())
-        onSpeak(final.trim()).catch(() => {})
-      }
+      rec.onerror = () => {}
+      rec.onend = () => { if (listening) { try { rec.start() } catch {} } }
+      return () => { try { rec.onend = null; rec.stop() } catch {} }
     }
-    rec.onerror = () => {}
-    return () => { try { rec.stop() } catch {} }
+    recRef.current = null
+    return () => {}
   }, [])
   async function toggle() {
-    const rec = recRef.current
-    if (!rec) { alert('SpeechRecognition not available in this environment'); return }
-    if (listening) { try { rec.stop() } catch {}; setListening(false); setInterim(''); return }
-    try { rec.start(); setListening(true) } catch {}
+    const sr = recRef.current
+    if (sr) {
+      if (listening) { try { sr.onend = null; sr.stop() } catch {}; setListening(false); setInterim(''); return }
+      try { sr.start(); setListening(true); (window as any).__localAgentMicStream = null } catch {}
+      return
+    }
+    // Fallback: MediaRecorder -> send to local Whisper via agent.speechToText
+    if (listening) {
+      try {
+        setListening(false)
+        const s = streamRef.current
+        const mr: any = (globalThis as any).mediaRecorderRef
+        if (mr) { try { mr.stop() } catch {} }
+        if (s) { s.getTracks().forEach(t => t.stop()) }
+        streamRef.current = null
+        const blob = new Blob(chunksRef.current, { type: mimeRef.current })
+        chunksRef.current = []
+        const toBase64 = (b: Blob) => new Promise<string>((resolve, reject) => {
+          const fr = new FileReader()
+          fr.onerror = () => reject(new Error('read error'))
+          fr.onload = () => {
+            const result = String(fr.result || '')
+            const m = result.match(/^data:[^;]+;base64,(.+)$/)
+            resolve(m ? m[1] : '')
+          }
+          fr.readAsDataURL(b)
+        })
+        const b64 = await toBase64(blob)
+        const res = await (window as any).agent?.speechToText?.({ audioBase64: b64, mimeType: mimeRef.current, fileName: `speech.${mimeRef.current.includes('ogg') ? 'ogg' : 'webm'}` })
+        const text = (res && res.success && res.text) ? res.text : ''
+        const final = (text || '').trim()
+        if (final) { onQueryNoChat(final) }
+      } catch {}
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+      ;(window as any).__localAgentMicStream = stream
+      const mime = ((): string => {
+        const candidates = [
+          'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg'
+        ]
+        for (const c of candidates) { try { if ((globalThis as any).MediaRecorder?.isTypeSupported?.(c)) return c } catch {} }
+        return 'audio/webm'
+      })()
+      mimeRef.current = mime
+      const mr = new (globalThis as any).MediaRecorder(stream, { mimeType: mime })
+      ;(globalThis as any).mediaRecorderRef = mr
+      chunksRef.current = []
+      mr.ondataavailable = (e: BlobEvent) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data) }
+      mr.onstop = async () => {}
+      mr.start()
+      setInterim('')
+      setListening(true)
+    } catch {
+      alert('Microphone access failed. Please allow mic permissions for Local Agent in System Settings > Privacy & Security > Microphone.')
+    }
   }
   return (
     <div className="space-y-3">
@@ -722,6 +953,13 @@ function VoiceDuplex({ busy, voiceId, onVoiceIdChange, voices, onLoadVoices, onS
             <option key={v.id} value={v.id}>{v.name}</option>
           ))}
         </select>
+      </div>
+      <div className="flex items-center justify-center mb-4">
+        <VisualizerSwitcher listening={listening} speaking={busy} showControls={false} />
+      </div>
+      <VoiceTextBox disabled={busy} onSubmit={(t) => onQueryNoChat(t)} />
+      <div className="flex items-center justify-center mb-3">
+        <VisualizerSwitcher listening={false} speaking={false} showControls={true} className="settings-only" />
       </div>
       <div className="flex items-center justify-center">
         <button onClick={toggle} disabled={busy} className={`relative h-24 w-24 rounded-full border ${listening ? 'border-blue-400' : 'border-white/10'} bg-white/5 flex items-center justify-center transition-transform hover:scale-[1.03]`}>
@@ -734,6 +972,37 @@ function VoiceDuplex({ busy, voiceId, onVoiceIdChange, voices, onLoadVoices, onS
         <div className="text-center text-xs text-white/60">{interim}</div>
       )}
     </div>
+  )
+}
+
+function VoiceTextBox({ disabled, onSubmit }: { disabled?: boolean; onSubmit: (text: string) => void }) {
+  const [value, setValue] = useState('')
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault()
+        const t = value.trim()
+        if (!t) return
+        setValue('')
+        onSubmit(t)
+      }}
+      className="flex items-center gap-2"
+    >
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="Type here to speak..."
+        disabled={disabled}
+        className="flex-1 h-9 rounded-md bg-white/5 border border-white/10 px-2 text-sm text-white/90 placeholder:text-white/40 outline-none"
+      />
+      <button
+        type="submit"
+        disabled={disabled || value.trim().length === 0}
+        className="h-9 px-3 rounded-md border border-white/10 bg-white/10 text-white/90 text-sm hover:bg-white/15 disabled:opacity-50"
+      >
+        Speak
+      </button>
+    </form>
   )
 }
 

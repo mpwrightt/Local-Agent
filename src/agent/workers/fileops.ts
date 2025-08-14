@@ -24,10 +24,10 @@ export async function spawnFileOpsAgent(ctx: Ctx) {
       const action: 'open' | 'reveal' = parsed.action === 'reveal' ? 'reveal' : 'open'
       const home = os.homedir()
       const scopes: Record<string, string> = {
-        desktop: path.join(home, 'Desktop'),
-        documents: path.join(home, 'Documents'),
-        downloads: path.join(home, 'Downloads'),
-        pictures: path.join(home, 'Pictures'),
+        desktop: path.join(home, process.platform === 'win32' ? 'Desktop' : 'Desktop'),
+        documents: path.join(home, process.platform === 'win32' ? 'Documents' : 'Documents'),
+        downloads: path.join(home, process.platform === 'win32' ? 'Downloads' : 'Downloads'),
+        pictures: path.join(home, process.platform === 'win32' ? 'Pictures' : 'Pictures'),
       }
       const roots = scope === 'any' ? Object.values(scopes) : [scopes[scope]].filter(Boolean)
       for (const root of roots) {
@@ -62,7 +62,11 @@ export async function spawnFileOpsAgent(ctx: Ctx) {
     
     // Locate operation with enhanced content search
     if (parsed?.op === 'locate' && typeof parsed.name === 'string') {
-      const name = String(parsed.name)
+      let name = String(parsed.name)
+      // If the payload carries conversational filler like: a folder I think it was named something like "X"
+      // prefer the quoted content inside it
+      const q = name.match(/["']([^"']+)["']/)
+      if (q && q[1]) name = q[1]
       const scope: string = (parsed.scope || 'any').toLowerCase()
       const contentSearch: boolean = parsed.contentSearch || false
       const originalPrompt: string = parsed.originalPrompt || name
@@ -116,34 +120,35 @@ export async function spawnFileOpsAgent(ctx: Ctx) {
       }
 
       // Standard filename/folder listing/search
-      // 1) Spotlight (fast, system-wide)
+      // 1) System-wide search (macOS Spotlight or Windows indexing) with safe fallbacks
       try {
         const { execSync } = await import('node:child_process')
         let out = ''
-        if (listType === 'folders') {
-          const root = scope !== 'any' ? scopes[scope] : os.homedir()
-          if (root && fs.existsSync(root)) {
-            const cmd = `find ${JSON.stringify(root)} -maxdepth 1 -type d -not -path '*/\\.*'`
+        if (process.platform === 'darwin') {
+          if (!listType) {
+            const cmd = `mdfind -name ${JSON.stringify(name)}`
             out = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
           }
-        } else if (listType === 'files') {
-          const root = scope !== 'any' ? scopes[scope] : os.homedir()
-          if (root && fs.existsSync(root)) {
-            const cmd = `find ${JSON.stringify(root)} -maxdepth 1 -type f -not -path '*/\\.*'`
-            out = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        } else if (process.platform === 'win32') {
+          if (!listType) {
+            // PowerShell: search common libraries recursively (limited depth for speed)
+            const roots = [
+              scopes.desktop, scopes.documents, scopes.downloads, scopes.pictures
+            ].filter(Boolean).map(r => r.replace(/`/g, '``').replace(/"/g, '``"'))
+            const ps = `Get-ChildItem -LiteralPath ${roots.map(r => `\"${r}\"`).join(',')} -Recurse -Depth 3 -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like \"*${name.replace(/"/g, '""')}*\" } | Select-Object -ExpandProperty FullName`
+            out = execSync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
           }
-        } else {
-          const cmd = `mdfind -name ${JSON.stringify(name)}`
-          out = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
         }
-        const lines = out.split('\n').map(s => s.trim()).filter(Boolean)
-        for (const p of lines) {
-          if (scope !== 'any') {
-            const base = scopes[scope]
-            if (base && !p.startsWith(base)) continue
+        if (out) {
+          const lines = out.split('\n').map(s => s.trim()).filter(Boolean)
+          for (const p of lines) {
+            if (scope !== 'any') {
+              const base = scopes[scope]
+              if (base && !p.startsWith(base)) continue
+            }
+            candidates.push(p)
+            if (candidates.length >= 50) break
           }
-          candidates.push(p)
-          if (candidates.length >= 50) break
         }
       } catch {}
       

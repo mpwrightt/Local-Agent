@@ -10,6 +10,12 @@ interface AgentAPI {
   onEvent(handler: (event: any) => void): () => void
 }
 
+interface ElectronAPI {
+  getVisualizerVariant(): Promise<{ variant: string }>
+  setVisualizerVariant(input: { variant: string }): Promise<void>
+}
+
 interface Window {
   agent: AgentAPI
+  electronAPI?: ElectronAPI
 }

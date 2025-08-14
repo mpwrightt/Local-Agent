@@ -1837,10 +1837,10 @@ async function spawnFileOpsAgent(ctx) {
       const action = parsed.action === "reveal" ? "reveal" : "open";
       const home2 = import_node_os4.default.homedir();
       const scopes = {
-        desktop: import_node_path4.default.join(home2, "Desktop"),
-        documents: import_node_path4.default.join(home2, "Documents"),
-        downloads: import_node_path4.default.join(home2, "Downloads"),
-        pictures: import_node_path4.default.join(home2, "Pictures")
+        desktop: import_node_path4.default.join(home2, process.platform === "win32" ? "Desktop" : "Desktop"),
+        documents: import_node_path4.default.join(home2, process.platform === "win32" ? "Documents" : "Documents"),
+        downloads: import_node_path4.default.join(home2, process.platform === "win32" ? "Downloads" : "Downloads"),
+        pictures: import_node_path4.default.join(home2, process.platform === "win32" ? "Pictures" : "Pictures")
       };
       const roots = scope === "any" ? Object.values(scopes) : [scopes[scope]].filter(Boolean);
       for (const root of roots) {
@@ -1871,7 +1871,9 @@ async function spawnFileOpsAgent(ctx) {
       return await spawnOCRAgent(ctx);
     }
     if ((parsed == null ? void 0 : parsed.op) === "locate" && typeof parsed.name === "string") {
-      const name = String(parsed.name);
+      let name = String(parsed.name);
+      const q = name.match(/["']([^"']+)["']/);
+      if (q && q[1]) name = q[1];
       const scope = (parsed.scope || "any").toLowerCase();
       const contentSearch = parsed.contentSearch || false;
       const originalPrompt = parsed.originalPrompt || name;
@@ -1922,30 +1924,33 @@ async function spawnFileOpsAgent(ctx) {
       try {
         const { execSync } = await import("child_process");
         let out = "";
-        if (listType === "folders") {
-          const root = scope !== "any" ? scopes[scope] : import_node_os4.default.homedir();
-          if (root && import_node_fs4.default.existsSync(root)) {
-            const cmd = `find ${JSON.stringify(root)} -maxdepth 1 -type d -not -path '*/\\.*'`;
+        if (process.platform === "darwin") {
+          if (!listType) {
+            const cmd = `mdfind -name ${JSON.stringify(name)}`;
             out = execSync(cmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
           }
-        } else if (listType === "files") {
-          const root = scope !== "any" ? scopes[scope] : import_node_os4.default.homedir();
-          if (root && import_node_fs4.default.existsSync(root)) {
-            const cmd = `find ${JSON.stringify(root)} -maxdepth 1 -type f -not -path '*/\\.*'`;
-            out = execSync(cmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        } else if (process.platform === "win32") {
+          if (!listType) {
+            const roots = [
+              scopes.desktop,
+              scopes.documents,
+              scopes.downloads,
+              scopes.pictures
+            ].filter(Boolean).map((r) => r.replace(/`/g, "``").replace(/"/g, '``"'));
+            const ps = `Get-ChildItem -LiteralPath ${roots.map((r) => `"${r}"`).join(",")} -Recurse -Depth 3 -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*${name.replace(/"/g, '""')}*" } | Select-Object -ExpandProperty FullName`;
+            out = execSync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
           }
-        } else {
-          const cmd = `mdfind -name ${JSON.stringify(name)}`;
-          out = execSync(cmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
         }
-        const lines = out.split("\n").map((s) => s.trim()).filter(Boolean);
-        for (const p of lines) {
-          if (scope !== "any") {
-            const base = scopes[scope];
-            if (base && !p.startsWith(base)) continue;
+        if (out) {
+          const lines = out.split("\n").map((s) => s.trim()).filter(Boolean);
+          for (const p of lines) {
+            if (scope !== "any") {
+              const base = scopes[scope];
+              if (base && !p.startsWith(base)) continue;
+            }
+            candidates.push(p);
+            if (candidates.length >= 50) break;
           }
-          candidates.push(p);
-          if (candidates.length >= 50) break;
         }
       } catch {
       }
@@ -2170,7 +2175,26 @@ function parseCommandFromDescription(desc) {
 }
 function isWhitelisted(cmd) {
   const first = cmd.trim().split(/\s+/)[0];
-  const whitelist = /* @__PURE__ */ new Set(["git", "ls", "cat", "echo", "pwd", "open", "osascript", "killall"]);
+  const whitelist = /* @__PURE__ */ new Set([
+    // cross-platform basics
+    "git",
+    "ls",
+    "cat",
+    "echo",
+    "pwd",
+    // macOS helpers
+    "open",
+    "osascript",
+    "killall",
+    // Windows helpers (PowerShell and cmd)
+    "Start-Process",
+    "Get-Process",
+    "Stop-Process",
+    "taskkill",
+    "cmd",
+    "powershell",
+    "Add-Type"
+  ]);
   return whitelist.has(first);
 }
 async function spawnShellAgent(ctx) {
@@ -2178,7 +2202,19 @@ async function spawnShellAgent(ctx) {
   if (!parsed) {
     throw new Error("No shell command provided");
   }
-  const cmd = parsed.cmd;
+  let cmd = parsed.cmd;
+  if (process.platform === "win32") {
+    const openMatch = cmd.match(/^open\s+-a\s+"([^"]+)"/i);
+    if (openMatch) {
+      const app2 = openMatch[1].replace('"', '""');
+      cmd = `Start-Process -FilePath "${app2}"`;
+    }
+    const osaQuit = cmd.match(/^osascript\b.+?tell application \"([^\"]+)\" to quit/i);
+    if (osaQuit) {
+      const app2 = osaQuit[1].replace('"', '""');
+      cmd = `Get-Process -Name "${app2}" -ErrorAction SilentlyContinue | Stop-Process -Force`;
+    }
+  }
   const meta = parsed.meta;
   const whitelisted = isWhitelisted(cmd);
   if (!whitelisted && !ctx.automation) {
@@ -2190,12 +2226,35 @@ async function spawnShellAgent(ctx) {
   if (meta && meta.kind === "slack_dm") {
     db.addRunEvent(ctx.runId, { type: "dm_hint", taskId: ctx.task.id, to: meta.to, message: meta.message });
   }
-  const shellBin = process.env.SHELL || "/bin/zsh";
+  const shellBin = process.platform === "win32" ? "powershell.exe" : process.env.SHELL || "/bin/zsh";
   const home = import_node_os5.default.homedir();
   return await new Promise((resolve, reject) => {
-    const child = (0, import_node_child_process2.spawn)(shellBin, ["-lc", cmd], { cwd: home, env: process.env });
+    var _a, _b;
+    const args = process.platform === "win32" ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd] : ["-lc", cmd];
+    const child = (0, import_node_child_process2.spawn)(shellBin, args, { cwd: home, env: process.env });
     let out = "";
     let err = "";
+    let aborted = false;
+    const onAbort = () => {
+      if (aborted) return;
+      aborted = true;
+      try {
+        db.addRunEvent(ctx.runId, { type: "shell_cancelled", taskId: ctx.task.id, cmd });
+      } catch {
+      }
+      try {
+        child.kill("SIGTERM");
+      } catch {
+      }
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+        }
+      }, 500);
+    };
+    if ((_a = ctx.signal) == null ? void 0 : _a.aborted) onAbort();
+    (_b = ctx.signal) == null ? void 0 : _b.addEventListener("abort", onAbort);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
@@ -2213,10 +2272,21 @@ async function spawnShellAgent(ctx) {
     child.on("close", (code) => {
       const exitCode = typeof code === "number" ? code : -1;
       db.addRunEvent(ctx.runId, { type: "shell_end", taskId: ctx.task.id, exitCode });
-      if (exitCode === 0 && meta && meta.kind === "slack_dm") {
+      if (!aborted && exitCode === 0 && meta && meta.kind === "slack_dm") {
         db.addRunEvent(ctx.runId, { type: "dm_sent", taskId: ctx.task.id, to: meta.to, message: meta.message });
       }
-      resolve({ exitCode, stdout: out, stderr: err });
+      if (aborted) {
+        reject(new Error("Cancelled"));
+      } else {
+        resolve({ exitCode, stdout: out, stderr: err });
+      }
+    });
+    child.on("close", () => {
+      var _a2;
+      try {
+        (_a2 = ctx.signal) == null ? void 0 : _a2.removeEventListener("abort", onAbort);
+      } catch {
+      }
     });
   });
 }
@@ -2266,6 +2336,10 @@ async function selectModel(client) {
   if (process.env.LMSTUDIO_MODEL && process.env.LMSTUDIO_MODEL.length > 0) {
     return process.env.LMSTUDIO_MODEL;
   }
+  if (process.env.OLLAMA_MODEL && process.env.OLLAMA_MODEL.length > 0) {
+    const name = process.env.OLLAMA_MODEL;
+    return name.startsWith("ollama:") ? name : `ollama:${name}`;
+  }
   try {
     const list = await client.models.list();
     const names = list.data.map((m) => m.id);
@@ -2275,7 +2349,73 @@ async function selectModel(client) {
   }
   return "local-model";
 }
+async function routeIntentLLM(prompt, model) {
+  var _a, _b, _c, _d;
+  try {
+    const isOllama = typeof model === "string" && model.startsWith("ollama:");
+    const sys = [
+      "You are an intent router for a macOS local assistant.",
+      "Return STRICT JSON only, no prose.",
+      "Schema:",
+      '{"op":"locate|list|open|reveal|mkdir|rename|move|copy|open_app|quit_app|focus_app|hide_app|restart_app|ocr_search|shell|none"',
+      ',"name?":string, "scope?":"desktop|documents|downloads|pictures|any"',
+      ',"listType?":"files|folders"',
+      ',"src?":string, "dest?":string, "action?":"open|reveal"',
+      ',"text?":string, "cmd?":string}',
+      'Rules: prefer concise fields; infer scope if user mentions a location; for list intents set op="list" with listType; if the user asks to search images by text, set op="ocr_search" and text to the phrase; if no actionable intent, set op="none".'
+    ].join(" ");
+    if (isOllama) {
+      const base = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+      const r = await fetch(base + "/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: model.replace(/^ollama:/, ""),
+          stream: false,
+          options: { temperature: 0.1, num_predict: 300 },
+          messages: [
+            { role: "system", content: sys },
+            { role: "user", content: prompt }
+          ]
+        })
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const content = (_a = j == null ? void 0 : j.message) == null ? void 0 : _a.content;
+      if (!content || typeof content !== "string") return null;
+      const parsed = JSON.parse(content);
+      if (parsed && typeof parsed.op === "string") return parsed;
+    } else {
+      const baseURL = process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
+      const body = {
+        model,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.1,
+        max_tokens: 300,
+        response_format: { type: "json_object" },
+        reasoning: { effort: "medium" }
+      };
+      const r = await fetch(baseURL.replace(/\/$/, "") + "/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const content = (_d = (_c = (_b = j == null ? void 0 : j.choices) == null ? void 0 : _b[0]) == null ? void 0 : _c.message) == null ? void 0 : _d.content;
+      if (!content || typeof content !== "string") return null;
+      const parsed = JSON.parse(content);
+      if (parsed && typeof parsed.op === "string") return parsed;
+    }
+  } catch {
+  }
+  return null;
+}
 function detectLocateTask(prompt) {
+  var _a, _b;
   const p = prompt.trim();
   try {
     const j = JSON.parse(p);
@@ -2286,11 +2426,28 @@ function detectLocateTask(prompt) {
     }
   } catch {
   }
+  if (/\b(file|folder)\b/i.test(p)) {
+    const nearNamed = p.match(/(?:named|called|something\s+like)\s+["']([^"']+)["']/i);
+    if (nearNamed && nearNamed[1]) {
+      const scopeWord = (((_a = p.match(/\bon\s+(?:my\s+)?(desktop|documents|downloads|pictures)\b/i)) == null ? void 0 : _a[1]) || "").toLowerCase();
+      const scope = ["desktop", "documents", "downloads", "pictures"].includes(scopeWord) ? scopeWord : "any";
+      const payload = { op: "locate", name: nearNamed[1].trim(), scope, originalPrompt: p };
+      return [{ id: "locate", title: "Locate file/folder", description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }];
+    }
+    const quotes = Array.from(p.matchAll(/["']([^"']+)["']/g));
+    if (quotes.length > 0) {
+      const name = quotes[quotes.length - 1][1].trim();
+      const scopeWord = (((_b = p.match(/\bon\s+(?:my\s+)?(desktop|documents|downloads|pictures)\b/i)) == null ? void 0 : _b[1]) || "").toLowerCase();
+      const scope = ["desktop", "documents", "downloads", "pictures"].includes(scopeWord) ? scopeWord : "any";
+      const payload = { op: "locate", name, scope, originalPrompt: p };
+      return [{ id: "locate", title: "Locate file/folder", description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }];
+    }
+  }
   const patterns = [
     // Direct requests
-    /where\s+is\s+(?:the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
-    /find\s+(?:the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
-    /locate\s+(?:the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
+    /where\s+is\s+(?:a|the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(?:my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
+    /find\s+(?:a|the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(?:my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
+    /locate\s+(?:a|the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(?:my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
     // Conversational patterns
     /I\s+(?:think\s+)?(?:have|had)\s+a\s+(?:file|folder).*?(?:called|named).*?["'](.+?)["']/i,
     /(?:there's|there\s+is)\s+a\s+(?:file|folder).*?(?:called|named).*?["'](.+?)["']/i,
@@ -2301,13 +2458,13 @@ function detectLocateTask(prompt) {
     // Pattern without quotes for names with special characters (more precise)
     /(?:it's\s+called|named)\s+something\s+like\s+"([^"]+)"/i
   ];
-  const listFolders = p.match(/\b(list|show|find)\s+(?:all\s+)?(folders|directories)\s+(?:on\s+the\s+)?(desktop|documents|downloads|pictures)\b/i);
+  const listFolders = p.match(/\b(list|show|find)\s+(?:all\s+)?(folders|directories)\s+(?:in|on)\s+(?:the\s+)?(?:my\s+)?(desktop|documents|downloads|pictures)\b/i);
   if (listFolders) {
     const scope = (listFolders[3] || "any").toLowerCase();
     const payload = { op: "locate", name: "*", scope, listType: "folders" };
     return [{ id: "locate", title: "List folders", description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }];
   }
-  const listFiles = p.match(/\b(list|show)\s+(?:all\s+)?files\s+(?:on\s+the\s+)?(desktop|documents|downloads|pictures)\b/i);
+  const listFiles = p.match(/\b(list|show)\s+(?:all\s+)?files\s+(?:in|on)\s+(?:the\s+)?(?:my\s+)?(desktop|documents|downloads|pictures)\b/i);
   if (listFiles) {
     const scope = (listFiles[2] || "any").toLowerCase();
     const payload = { op: "locate", name: "*", scope, listType: "files" };
@@ -2373,6 +2530,16 @@ function detectLocateTask(prompt) {
       return [
         { id: "locate", title, description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }
       ];
+    }
+  }
+  if (/\b(file|folder)\b/i.test(p)) {
+    const m = p.match(/(?:named|called|something\s+like)\s+([^"'\n]+?)(?:\s+on\s+(?:my\s+)?(desktop|documents|downloads|pictures)\b|[.!?]|$)/i);
+    if (m && m[1]) {
+      const extracted = m[1].trim().replace(/^\b(a|the)\b\s*/i, "");
+      const scopeWord = (m[2] || "").toLowerCase();
+      const scope = ["desktop", "documents", "downloads", "pictures"].includes(scopeWord) ? scopeWord : "any";
+      const payload = { op: "locate", name: extracted, scope, originalPrompt: p };
+      return [{ id: "locate", title: "Locate file/folder", description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }];
     }
   }
   return null;
@@ -2637,7 +2804,7 @@ function detectRenameTask(prompt) {
   return null;
 }
 async function planTasks(prompt, modelOverride, deep, automation) {
-  var _a, _b;
+  var _a, _b, _c, _d, _e, _f, _g, _h;
   try {
     const j = JSON.parse(prompt);
     if (j && typeof j === "object") {
@@ -2711,6 +2878,78 @@ async function planTasks(prompt, modelOverride, deep, automation) {
   if (renamePlan) return renamePlan;
   const shellPlan = detectShellTask(prompt);
   if (shellPlan) return shellPlan;
+  if (automation) {
+    try {
+      const baseURL2 = process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
+      const client2 = {
+        models: { list: async () => await (await fetch(baseURL2.replace(/\/$/, "") + "/models")).json() }
+      };
+      let modelName2 = modelOverride ?? await selectModel(client2);
+      const routed = await routeIntentLLM(prompt, modelName2);
+      if (routed && routed.op && routed.op !== "none") {
+        switch (routed.op) {
+          case "list": {
+            const scope = routed.scope || "any";
+            const listType = routed.listType || "folders";
+            const payload = { op: "locate", name: "*", scope, listType };
+            return [{ id: "locate", title: `List ${listType}`, description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }];
+          }
+          case "locate": {
+            const payload = { op: "locate", name: routed.name || "*", scope: routed.scope || "any", originalPrompt: prompt };
+            return [{ id: "locate", title: "Locate file/folder", description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }];
+          }
+          case "ocr_search": {
+            const payload = { op: "ocr_search", text: routed.text || "*", paths: [], originalPrompt: prompt };
+            return [{ id: "ocr", title: "Search images for text content", description: JSON.stringify(payload), role: "fileops", deps: [], budgets: {} }];
+          }
+          case "mkdir": {
+            if (routed.name) return [{ id: "mkdir", title: `Create folder ${routed.name}`, description: JSON.stringify({ op: "mkdir", name: routed.name, scope: routed.scope || "documents" }), role: "fileops", deps: [], budgets: {} }];
+            break;
+          }
+          case "rename": {
+            if (routed.src && routed.dest) return [{ id: "rename", title: "Rename file", description: JSON.stringify({ op: "rename", src: routed.src, dest: routed.dest }), role: "fileops", deps: [], budgets: {} }];
+            break;
+          }
+          case "move": {
+            if (routed.src && routed.dest) return [{ id: "move", title: "Move item", description: JSON.stringify({ op: "move", src: routed.src, dest: routed.dest }), role: "fileops", deps: [], budgets: {} }];
+            break;
+          }
+          case "copy": {
+            if (routed.src && routed.dest) return [{ id: "copy", title: "Copy item", description: JSON.stringify({ op: "copy", src: routed.src, dest: routed.dest }), role: "fileops", deps: [], budgets: {} }];
+            break;
+          }
+          case "open_app": {
+            if (routed.name) return [{ id: "open_app", title: `Open ${routed.name}`, description: JSON.stringify({ cmd: `open -a "${routed.name}"` }), role: "shell", deps: [], budgets: {} }];
+            break;
+          }
+          case "quit_app": {
+            if (routed.name) return [{ id: "quit_app", title: `Quit ${routed.name}`, description: JSON.stringify({ cmd: `osascript -e 'tell application "${routed.name}" to quit'` }), role: "shell", deps: [], budgets: {} }];
+            break;
+          }
+          case "focus_app": {
+            if (routed.name) return [{ id: "focus_app", title: `Focus ${routed.name}`, description: JSON.stringify({ cmd: `osascript -e 'tell application "${routed.name}" to activate'` }), role: "shell", deps: [], budgets: {} }];
+            break;
+          }
+          case "hide_app": {
+            if (routed.name) return [{ id: "hide_app", title: `Hide ${routed.name}`, description: JSON.stringify({ cmd: `osascript -e 'tell application "${routed.name}" to hide'` }), role: "shell", deps: [], budgets: {} }];
+            break;
+          }
+          case "restart_app": {
+            if (routed.name) return [
+              { id: "quit_app", title: `Quit ${routed.name}`, description: JSON.stringify({ cmd: `osascript -e 'tell application "${routed.name}" to quit'` }), role: "shell", deps: [], budgets: {} },
+              { id: "open_app", title: `Open ${routed.name}`, description: JSON.stringify({ cmd: `open -a "${routed.name}"` }), role: "shell", deps: ["quit_app"], budgets: {} }
+            ];
+            break;
+          }
+          case "shell": {
+            if (routed.cmd) return [{ id: "sh1", title: "Run shell command", description: JSON.stringify({ cmd: routed.cmd }), role: "shell", deps: [], budgets: {} }];
+            break;
+          }
+        }
+      }
+    } catch {
+    }
+  }
   const taskFocus = automation ? "Mac control, file operations, shell commands, browser automation" : "web research, information gathering, analysis, synthesis";
   const preferredRoles = automation ? "fileops (local file edits), shell (terminal commands), automation (browser/app control)" : "research (web), reviewer (analysis), fileops (summary writing)";
   const system = `You are a local orchestrator that breaks a single user task into a small DAG of concrete steps.
@@ -2745,35 +2984,85 @@ Respond with valid JSON only, no other text.`;
       }
     }
   };
-  let res;
   let modelName = modelOverride ?? await selectModel(client);
+  let textFromLLM = null;
+  const isOllama = typeof modelName === "string" && modelName.startsWith("ollama:");
   try {
-    res = await client.chat.completions.create({
-      model: modelName,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.2,
-      max_tokens: 300,
-      response_format: { type: "json_object" }
-    });
+    if (isOllama) {
+      const base = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+      const r = await fetch(base + "/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: modelName.replace(/^ollama:/, ""),
+          stream: false,
+          options: { temperature: 0.2, num_predict: 600 },
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: prompt }
+          ]
+        })
+      });
+      if (r.ok) {
+        const j = await r.json();
+        textFromLLM = String(((_a = j == null ? void 0 : j.message) == null ? void 0 : _a.content) || "");
+      }
+    } else {
+      const resp = await client.chat.completions.create({
+        model: modelName,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.2,
+        max_tokens: 300,
+        response_format: { type: "json_object" }
+      });
+      textFromLLM = String(((_d = (_c = (_b = resp == null ? void 0 : resp.choices) == null ? void 0 : _b[0]) == null ? void 0 : _c.message) == null ? void 0 : _d.content) ?? "");
+    }
   } catch (e) {
-    modelName = "local-model";
-    res = await client.chat.completions.create({
-      model: modelName,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.2,
-      max_tokens: 300
-    });
+    modelName = isOllama ? modelName : "local-model";
+    if (isOllama) {
+      try {
+        const base = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+        const r = await fetch(base + "/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: modelName.replace(/^ollama:/, ""),
+            stream: false,
+            options: { temperature: 0.2, num_predict: 500 },
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: prompt }
+            ]
+          })
+        });
+        if (r.ok) {
+          const j = await r.json();
+          textFromLLM = String(((_e = j == null ? void 0 : j.message) == null ? void 0 : _e.content) || "");
+        }
+      } catch {
+      }
+    } else {
+      try {
+        const resp = await client.chat.completions.create({
+          model: modelName,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.2,
+          max_tokens: 300
+        });
+        textFromLLM = String(((_h = (_g = (_f = resp == null ? void 0 : resp.choices) == null ? void 0 : _f[0]) == null ? void 0 : _g.message) == null ? void 0 : _h.content) ?? "");
+      } catch {
+      }
+    }
   }
   let tasks = [];
   try {
-    const text = ((_b = (_a = res.choices[0]) == null ? void 0 : _a.message) == null ? void 0 : _b.content) ?? "";
-    const parsed = JSON.parse(text);
+    const parsed = JSON.parse(String(textFromLLM || ""));
     const maybeArray = Array.isArray(parsed) ? parsed : parsed.tasks;
     tasks = import_zod.z.array(TaskSchema).parse(maybeArray);
   } catch (e) {
@@ -2889,7 +3178,7 @@ async function synthesizeNode(state) {
     const mod = await import("node-fetch");
     return mod.default;
   }
-  let model = process.env.LMSTUDIO_MODEL ?? "local-model";
+  let model = process.env.LMSTUDIO_MODEL ?? (process.env.OLLAMA_MODEL ? process.env.OLLAMA_MODEL.startsWith("ollama:") ? process.env.OLLAMA_MODEL : `ollama:${process.env.OLLAMA_MODEL}` : "local-model");
   try {
     const doFetch2 = await getFetch2();
     const resp = await doFetch2(baseURL.replace(/\/$/, "") + "/models");
@@ -2958,12 +3247,85 @@ var import_node_fs7 = __toESM(require("fs"), 1);
 var import_node_os7 = __toESM(require("os"), 1);
 var import_node_path6 = __toESM(require("path"), 1);
 var activeRuns = /* @__PURE__ */ new Map();
+function envRoleConcurrency(role) {
+  const key = `AGENT_ROLE_CONCURRENCY_${role.toUpperCase()}`;
+  const raw = process.env[key];
+  if (!raw) return void 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : void 0;
+}
+function defaultRoleConcurrency(role) {
+  const env = envRoleConcurrency(role);
+  if (env != null) return env;
+  const map = {
+    research: 2,
+    fileops: 3,
+    shell: 1,
+    reviewer: 1
+  };
+  return map[role];
+}
+function createLimiter(max) {
+  if (max == null || max <= 0 || !Number.isFinite(max)) {
+    return async function(fn) {
+      return fn();
+    };
+  }
+  let active = 0;
+  const queue = [];
+  const runNext = () => {
+    if (active >= max) return;
+    const next = queue.shift();
+    if (!next) return;
+    active++;
+    next();
+  };
+  return async function limit(fn) {
+    return new Promise((resolve, reject) => {
+      const task = () => {
+        fn().then((v) => {
+          active--;
+          runNext();
+          resolve(v);
+        }, (e) => {
+          active--;
+          runNext();
+          reject(e);
+        });
+      };
+      if (active < max) {
+        active++;
+        task();
+      } else {
+        queue.push(task);
+      }
+    });
+  };
+}
+function tasksToMermaid(tasks) {
+  const lines = ["graph TD"];
+  for (const t of tasks) {
+    const label = `${t.title.replace(/"/g, '\\"')} (${t.role})`;
+    lines.push(`${t.id}["${label}"]`);
+  }
+  for (const t of tasks) {
+    for (const d of t.deps) {
+      lines.push(`${d} --> ${t.id}`);
+    }
+  }
+  return lines.join("\n");
+}
 async function startOrchestrator(input) {
   const controller = new AbortController();
   activeRuns.set(input.runId, controller);
   try {
     const tasks = await planTasks(input.prompt, input.model, input.deep, input.automation);
     db.addRunEvent(input.runId, { type: "plan", tasks });
+    try {
+      const mermaid = tasksToMermaid(tasks);
+      db.addRunEvent(input.runId, { type: "plan_mermaid", mermaid });
+    } catch {
+    }
     if (input.dryRun) {
       db.addRunEvent(input.runId, { type: "dry_run" });
       db.completeRun(input.runId);
@@ -2987,7 +3349,18 @@ async function startOrchestrator(input) {
         break;
       }
       for (const t of wave) started.add(t.id);
-      await Promise.all(wave.map((t) => executeTask(t, input, controller.signal)));
+      const limiters = /* @__PURE__ */ new Map();
+      const getLimiter = (role) => {
+        const ex = limiters.get(role);
+        if (ex) return ex;
+        const lim = createLimiter(defaultRoleConcurrency(role));
+        limiters.set(role, lim);
+        return lim;
+      };
+      await Promise.all(wave.map((t) => {
+        const limiter = getLimiter(t.role);
+        return limiter(() => executeTask(t, input, controller.signal));
+      }));
       for (const t of wave) done.add(t.id);
     }
     db.completeRun(input.runId);
@@ -2995,79 +3368,132 @@ async function startOrchestrator(input) {
     activeRuns.delete(input.runId);
   }
 }
+function envDefaultSecondsForRole(role) {
+  const key = `AGENT_DEFAULT_BUDGET_SECONDS_${role.toUpperCase()}`;
+  const raw = process.env[key];
+  if (!raw) return void 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : void 0;
+}
+function defaultSecondsForRole(role) {
+  const envVal = envDefaultSecondsForRole(role);
+  if (envVal != null) return envVal;
+  const map = {
+    research: 90,
+    fileops: 15,
+    shell: 30,
+    reviewer: 25,
+    summarizer: 15
+  };
+  return map[role];
+}
+function createBudgetAbortController(task, runId, parentSignal) {
+  var _a;
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort();
+  parentSignal.addEventListener("abort", onParentAbort);
+  let timer = null;
+  const explicit = (_a = task == null ? void 0 : task.budgets) == null ? void 0 : _a.seconds;
+  const seconds = Number(explicit ?? defaultSecondsForRole(task == null ? void 0 : task.role) ?? 0);
+  if (seconds > 0 && Number.isFinite(seconds) && seconds > 0) {
+    const ms = Math.max(1, Math.floor(seconds * 1e3));
+    timer = setTimeout(() => {
+      try {
+        db.addRunEvent(runId, { type: "task_timeout", taskId: task.id, seconds });
+      } catch {
+      }
+      controller.abort();
+    }, ms);
+  }
+  const dispose = () => {
+    parentSignal.removeEventListener("abort", onParentAbort);
+    if (timer) {
+      clearTimeout(timer);
+    }
+  };
+  return { signal: controller.signal, dispose };
+}
 async function executeTask(task, ctx, signal) {
   const { runId, sessionId } = ctx;
   db.updateTaskStatus(runId, task.id, "running", { title: task.title, role: task.role });
   db.addRunEvent(runId, { type: "task_start", taskId: task.id, title: task.title, role: task.role });
   try {
-    let result;
-    switch (task.role) {
-      case "research":
-        result = await spawnResearchAgent({ runId, sessionId, task, query: ctx.prompt, deep: ctx.deep, signal });
-        break;
-      case "fileops":
-        result = await spawnFileOpsAgent({ runId, sessionId, task, automation: ctx.automation, signal });
-        break;
-      case "shell":
-        result = await spawnShellAgent({ runId, sessionId, task, automation: ctx.automation });
-        break;
-      case "reviewer":
-        try {
-          const researchResults = db.getTaskResultsByRole(runId, "research");
-          const urlSeen = /* @__PURE__ */ new Set();
-          const targets = [];
-          for (const r of researchResults) {
-            for (const t of (r == null ? void 0 : r.targets) ?? []) {
-              if ((t == null ? void 0 : t.url) && !urlSeen.has(t.url)) {
-                urlSeen.add(t.url);
-                targets.push({ title: t.title, url: t.url });
+    const { signal: taskSignal, dispose } = createBudgetAbortController(task, runId, signal);
+    try {
+      let result;
+      switch (task.role) {
+        case "research":
+          result = await spawnResearchAgent({ runId, sessionId, task, query: ctx.prompt, deep: ctx.deep, signal: taskSignal });
+          break;
+        case "fileops":
+          result = await spawnFileOpsAgent({ runId, sessionId, task, automation: ctx.automation, signal: taskSignal });
+          break;
+        case "shell":
+          result = await spawnShellAgent({ runId, sessionId, task, automation: ctx.automation, signal: taskSignal });
+          break;
+        case "reviewer":
+          try {
+            const researchResults = db.getTaskResultsByRole(runId, "research");
+            const urlSeen = /* @__PURE__ */ new Set();
+            const targets = [];
+            for (const r of researchResults) {
+              for (const t of (r == null ? void 0 : r.targets) ?? []) {
+                if ((t == null ? void 0 : t.url) && !urlSeen.has(t.url)) {
+                  urlSeen.add(t.url);
+                  targets.push({ title: t.title, url: t.url });
+                }
               }
             }
-          }
-          const limitedTargets = targets.slice(0, 12);
-          const corpusParts = [];
-          for (const r of researchResults) {
-            const pth = r == null ? void 0 : r.aggregatePath;
-            try {
-              if (pth && import_node_fs7.default.existsSync(pth)) {
-                corpusParts.push(import_node_fs7.default.readFileSync(pth, "utf8"));
+            const limitedTargets = targets.slice(0, 12);
+            const corpusParts = [];
+            for (const r of researchResults) {
+              const pth = r == null ? void 0 : r.aggregatePath;
+              try {
+                if (pth && import_node_fs7.default.existsSync(pth)) {
+                  corpusParts.push(import_node_fs7.default.readFileSync(pth, "utf8"));
+                }
+              } catch {
               }
-            } catch {
             }
-          }
-          let aggregatePath = void 0;
-          if (corpusParts.length > 0) {
-            const baseDir = import_node_path6.default.join(import_node_os7.default.homedir(), ".local-agent");
-            if (!import_node_fs7.default.existsSync(baseDir)) import_node_fs7.default.mkdirSync(baseDir, { recursive: true });
-            aggregatePath = import_node_path6.default.join(baseDir, `research-aggregate-merged-${Date.now()}.txt`);
-            try {
-              import_node_fs7.default.writeFileSync(aggregatePath, corpusParts.join("\n\n---\n\n"), "utf8");
-            } catch {
+            let aggregatePath = void 0;
+            if (corpusParts.length > 0) {
+              const baseDir = import_node_path6.default.join(import_node_os7.default.homedir(), ".local-agent");
+              if (!import_node_fs7.default.existsSync(baseDir)) import_node_fs7.default.mkdirSync(baseDir, { recursive: true });
+              aggregatePath = import_node_path6.default.join(baseDir, `research-aggregate-merged-${Date.now()}.txt`);
+              try {
+                import_node_fs7.default.writeFileSync(aggregatePath, corpusParts.join("\n\n---\n\n"), "utf8");
+              } catch {
+              }
             }
+            const graph = buildResearchGraph();
+            const stateIn = {
+              prompt: ctx.prompt,
+              deep: Boolean(ctx.deep),
+              targets: limitedTargets,
+              aggregatePath,
+              synthesis: void 0,
+              snippets: [],
+              selected: []
+            };
+            const out = await graph.invoke(stateIn);
+            const summary = out.synthesis ?? "No synthesis produced.";
+            db.addRunEvent(runId, { type: "review_note", taskId: task.id, summary });
+            result = { summary };
+          } catch (err) {
+            result = { summary: "Synthesis failed." };
           }
-          const graph = buildResearchGraph();
-          const stateIn = {
-            prompt: ctx.prompt,
-            deep: Boolean(ctx.deep),
-            targets: limitedTargets,
-            aggregatePath,
-            synthesis: void 0,
-            snippets: [],
-            selected: []
-          };
-          const out = await graph.invoke(stateIn);
-          const summary = out.synthesis ?? "No synthesis produced.";
-          db.addRunEvent(runId, { type: "review_note", taskId: task.id, summary });
-          result = { summary };
-        } catch (err) {
-          result = { summary: "Synthesis failed." };
-        }
-        break;
-      default:
-        result = { skipped: true };
+          break;
+        default:
+          result = { skipped: true };
+      }
+      db.updateTaskStatus(runId, task.id, "done", { title: task.title, role: task.role });
+      db.addRunEvent(runId, { type: "task_result", taskId: task.id, taskRole: task.role, result });
+    } finally {
+      try {
+        dispose();
+      } catch {
+      }
     }
-    db.updateTaskStatus(runId, task.id, "done", { title: task.title, role: task.role });
-    db.addRunEvent(runId, { type: "task_result", taskId: task.id, taskRole: task.role, result });
   } catch (err) {
     db.updateTaskStatus(runId, task.id, "failed", { title: task.title, role: task.role });
     db.addRunEvent(runId, { type: "error", taskId: task.id, message: String((err == null ? void 0 : err.message) ?? err) });
@@ -3182,6 +3608,7 @@ function watchPlugins(pluginsDir) {
 }
 
 // src/agent/runtime.ts
+init_event_bus();
 init_confirm();
 
 // src/agent/config.ts
@@ -3219,6 +3646,14 @@ function setDefaultModel(model) {
 function getRetentionDays() {
   const d = readConfig().retentionDays;
   return typeof d === "number" && d > 0 ? d : 14;
+}
+function getVisualizerVariant() {
+  return readConfig().visualizerVariant || "halo";
+}
+function setVisualizerVariant(variant) {
+  const cfg = readConfig();
+  cfg.visualizerVariant = variant;
+  writeConfig(cfg);
 }
 
 // src/agent/runtime.ts
@@ -3303,11 +3738,36 @@ var LMClient = class {
     return Array.isArray(j == null ? void 0 : j.data) ? j.data.map((m) => m.id) : [];
   }
   async chat(messages, model, opts) {
+    var _a, _b, _c, _d;
+    const body = {
+      model,
+      messages,
+      temperature: (opts == null ? void 0 : opts.temperature) ?? 0.7,
+      stream: Boolean(opts == null ? void 0 : opts.stream)
+    };
+    if (opts == null ? void 0 : opts.reasoningEffort) {
+      body.reasoning_effort = opts.reasoningEffort;
+      console.log(`[LMClient] Sending reasoning effort: ${opts.reasoningEffort}`);
+      console.log(`[LMClient] Direct to LM Studio - no proxy`);
+    }
+    if (typeof (opts == null ? void 0 : opts.maxTokens) === "number") body.max_tokens = opts.maxTokens;
+    if (typeof (opts == null ? void 0 : opts.topP) === "number") body.top_p = opts.topP;
+    if (typeof (opts == null ? void 0 : opts.presencePenalty) === "number") body.presence_penalty = opts.presencePenalty;
+    if (typeof (opts == null ? void 0 : opts.frequencyPenalty) === "number") body.frequency_penalty = opts.frequencyPenalty;
+    if (opts == null ? void 0 : opts.reasoningEffort) {
+      console.log(`[LMClient] Full request body with reasoning effort:`, JSON.stringify(body, null, 2));
+    }
     const r = await fetch(this.baseURL.replace(/\/$/, "") + "/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, temperature: (opts == null ? void 0 : opts.temperature) ?? 0.7, stream: Boolean(opts == null ? void 0 : opts.stream) })
+      body: JSON.stringify(body)
     });
+    if (opts == null ? void 0 : opts.reasoningEffort) {
+      console.log(`[LMClient] Response status:`, r.status);
+      const responseClone = r.clone();
+      const responseData = await responseClone.json();
+      console.log(`[LMClient] Response reasoning_content length:`, ((_d = (_c = (_b = (_a = responseData == null ? void 0 : responseData.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.reasoning_content) == null ? void 0 : _d.length) || 0);
+    }
     return r;
   }
 };
@@ -3335,24 +3795,6 @@ function createAgentRuntime(ipcMain2) {
     }
     return null;
   }
-  async function detectChatIntent(_client, _modelName, text) {
-    var _a, _b, _c;
-    try {
-      const sys = 'You are an intent router. Return strict JSON only with fields: {"action": "answer|quick_web|open_url|summarize_url|to_tasks|to_research", "query?": string, "url?": string}. Choose quick_web for lightweight web lookup; to_research only if the user explicitly requests deep research.';
-      const baseURL = process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
-      const client = new LMClient(baseURL);
-      const r = await client.chat([
-        { role: "system", content: sys },
-        { role: "user", content: text }
-      ], _modelName, { temperature: 0 });
-      const j = await r.json();
-      const content = ((_c = (_b = (_a = j == null ? void 0 : j.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) ?? "{}";
-      const parsed = JSON.parse(content);
-      if (typeof (parsed == null ? void 0 : parsed.action) === "string") return parsed;
-    } catch {
-    }
-    return { action: "answer" };
-  }
   try {
     registerBuiltInWorkers();
   } catch {
@@ -3373,7 +3815,7 @@ function createAgentRuntime(ipcMain2) {
   ipcMain2.handle("agent/startTask", async (_event, input) => {
     const sessionId = db.createSession(input.prompt);
     const runId = db.createRun(sessionId);
-    const chosenModel = input.model ?? getDefaultModel() ?? process.env.LMSTUDIO_MODEL ?? "local-model";
+    const chosenModel = input.model ?? getDefaultModel() ?? process.env.LMSTUDIO_MODEL ?? process.env.OLLAMA_MODEL ?? "local-model";
     db.addRunEvent(runId, { type: "run_started", prompt: input.prompt, model: chosenModel, deep: Boolean(input.deep), dryRun: Boolean(input.dryRun), automation: Boolean(input.automation) });
     startOrchestrator({ sessionId, runId, prompt: input.prompt, model: chosenModel, deep: Boolean(input.deep), dryRun: Boolean(input.dryRun), automation: Boolean(input.automation) });
     return { runId };
@@ -3386,6 +3828,46 @@ function createAgentRuntime(ipcMain2) {
   });
   ipcMain2.handle("agent/setDefaultModel", async (_event, input) => {
     setDefaultModel(input.model);
+  });
+  ipcMain2.handle("agent/getDefaultModel", async () => {
+    try {
+      return { model: getDefaultModel() };
+    } catch {
+      return { model: void 0 };
+    }
+  });
+  ipcMain2.handle("agent/listModels", async () => {
+    const results = /* @__PURE__ */ new Set();
+    try {
+      const baseURL = process.env.LM_GATEWAY_URL ?? process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
+      const r = await fetch(baseURL.replace(/\/$/, "") + "/models");
+      if (r.ok) {
+        const j = await r.json();
+        const names = Array.isArray(j == null ? void 0 : j.data) ? j.data.map((m) => String(m.id)) : [];
+        for (const n of names) results.add(n);
+      }
+    } catch {
+    }
+    try {
+      const ollama = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+      const r = await fetch(ollama + "/api/tags");
+      if (r.ok) {
+        const j = await r.json();
+        const arr = Array.isArray(j == null ? void 0 : j.models) ? j.models : [];
+        for (const m of arr) {
+          const name = String((m == null ? void 0 : m.model) || (m == null ? void 0 : m.name) || "");
+          if (name) results.add("ollama:" + name);
+        }
+      }
+    } catch {
+    }
+    return Array.from(results);
+  });
+  ipcMain2.handle("agent/getVisualizerVariant", async () => {
+    return { variant: getVisualizerVariant() };
+  });
+  ipcMain2.handle("agent/setVisualizerVariant", async (_event, input) => {
+    setVisualizerVariant(input.variant);
   });
   ipcMain2.handle("agent/cancelRun", async (_event, input) => {
     try {
@@ -3459,6 +3941,76 @@ function createAgentRuntime(ipcMain2) {
       return { success: false, error: error.message };
     }
   });
+  ipcMain2.handle("agent/speechToText", async (_event, input) => {
+    try {
+      const getLocalWhisperUrl = async () => {
+        if (process.env.WHISPER_HTTP_URL && process.env.WHISPER_HTTP_URL.trim()) return process.env.WHISPER_HTTP_URL.trim();
+        try {
+          const { readFileSync, existsSync } = await import("fs");
+          const { join } = await import("path");
+          const roots = [process.cwd(), join(process.cwd(), ".."), join(process.cwd(), "resources")];
+          for (const r2 of roots) {
+            const p = join(r2, "keys.md");
+            if (existsSync(p)) {
+              const t = readFileSync(p, "utf8");
+              const m = t.match(/whisper\s*url\s*:\s*(https?:[^\s]+)\b/i);
+              if (m && m[1]) return m[1].trim();
+            }
+          }
+        } catch {
+        }
+        return null;
+      };
+      const mime = (input.mimeType || "audio/webm").trim();
+      const fileName = (input.fileName || `speech.${mime.includes("mp3") ? "mp3" : mime.includes("wav") ? "wav" : mime.includes("m4a") ? "m4a" : "webm"}`).trim();
+      const binary = Buffer.from(input.audioBase64, "base64");
+      const form = new FormData();
+      const blob = new Blob([binary], { type: mime });
+      form.append("file", blob, fileName);
+      form.append("model", "whisper-1");
+      const localUrl = await getLocalWhisperUrl();
+      if (localUrl) {
+        const r2 = await fetch(localUrl, { method: "POST", body: form });
+        if (!r2.ok) {
+          const msg = await r2.text().catch(() => "");
+          return { success: false, error: `Local STT error ${r2.status}: ${msg.slice(0, 200)}` };
+        }
+        const j2 = await r2.json();
+        const txt = typeof (j2 == null ? void 0 : j2.text) === "string" ? j2.text : typeof (j2 == null ? void 0 : j2.transcription) === "string" ? j2.transcription : "";
+        return { success: true, text: txt };
+      }
+      const getKey = async () => {
+        if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim()) return process.env.OPENAI_API_KEY.trim();
+        try {
+          const { readFileSync, existsSync } = await import("fs");
+          const { join } = await import("path");
+          const roots = [process.cwd(), join(process.cwd(), ".."), join(process.cwd(), "resources")];
+          for (const r2 of roots) {
+            const p = join(r2, "keys.md");
+            if (existsSync(p)) {
+              const t = readFileSync(p, "utf8");
+              const m = t.match(/openai\s*key\s*:\s*([a-zA-Z0-9_\-]+)\b/i);
+              if (m && m[1]) return m[1].trim();
+            }
+          }
+        } catch {
+        }
+        return null;
+      };
+      const key = await getKey();
+      if (!key) return { success: false, error: 'Missing OPENAI_API_KEY (or keys.md entry: "openai key:") and no WHISPER_HTTP_URL configured' };
+      const r = await fetch("https://api.openai.com/v1/audio/transcriptions", { method: "POST", headers: { "Authorization": `Bearer ${key}` }, body: form });
+      if (!r.ok) {
+        const msg = await r.text().catch(() => "");
+        return { success: false, error: `STT error ${r.status}: ${msg.slice(0, 200)}` };
+      }
+      const j = await r.json();
+      const text = (j == null ? void 0 : j.text) || "";
+      return { success: true, text };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
   ipcMain2.handle("agent/saveUploadedImage", async (_event, input) => {
     const { tmpdir } = await import("os");
     const { join } = await import("path");
@@ -3481,17 +4033,17 @@ function createAgentRuntime(ipcMain2) {
     }
   });
   ipcMain2.handle("agent/simpleChat", async (_event, input) => {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o;
     const searchEnabled = input.searchEnabled !== false;
     const showThinking = input.showThinking !== false;
     try {
-      const baseURL = process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
+      const baseURL = process.env.LM_GATEWAY_URL ?? process.env.LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1";
       const client = new LMClient(baseURL);
       let modelName = input.model ?? "gpt-oss:20b";
       if (!input.model) {
         try {
           const models = await client.listModels();
-          modelName = models.find((m) => m.includes("gpt-oss")) ?? models.find((m) => m.includes("custom-test")) ?? models[0] ?? "gpt-oss:20b";
+          modelName = models.find((m) => m.includes("openai/gpt-oss")) ?? models.find((m) => m.includes("gpt-oss")) ?? models.find((m) => m.includes("custom-test")) ?? models[0] ?? "gpt-oss:20b";
         } catch {
           modelName = "gpt-oss:20b";
         }
@@ -3499,18 +4051,18 @@ function createAgentRuntime(ipcMain2) {
       const chatGuard = [
         'You are Local Agent in Chat mode. You may use the provided "Web context (short)" if present, but you do not browse live.',
         "Never output tool-call markup or channel tags. Cite web sources using Markdown links when you rely on the web context.",
-        'When helpful, start with a single line: "Reasoning (concise): ..." followed by the answer.'
+        "If the API supports it, place your chain-of-thought in reasoning_content and put only the final answer in content.",
+        "If reasoning_content is not supported, stream your chain-of-thought inside <think>...</think> and put the final answer outside the think block. Do not use any other custom tags."
       ].join(" ");
       const userText = ((_a = input.messages.slice().reverse().find((m) => m.role === "user")) == null ? void 0 : _a.content) ?? "";
-      const intent = searchEnabled ? await detectChatIntent(client, modelName, userText) : { action: "answer" };
-      const quickRegex = /\b(search|look up|find|news|latest|open|go to|happen|happened|going on|events|today|this week|this weekend|over the weekend)\b/i;
-      const wantsQuick = searchEnabled && (intent.action === "quick_web" || intent.action === "summarize_url" || intent.action === "open_url" || quickRegex.test(userText) || /https?:\/\//i.test(userText));
+      const quickRegex = /\b(search|look up|find|news|latest|open\s+url|go to)\b/i;
+      const urlMatchHeuristic = /https?:\/\/\S+/i.test(userText);
+      const wantsQuick = searchEnabled && (quickRegex.test(userText) || urlMatchHeuristic);
       let quickContext;
       let quickHits;
       if (wantsQuick) {
         try {
-          const urlFromIntent = intent.url && /^https?:\/\//i.test(intent.url) ? intent.url : void 0;
-          const urlMatch = urlFromIntent ? [urlFromIntent] : userText.match(/https?:\/\/\S+/);
+          const urlMatch = userText.match(/https?:\/\/\S+/);
           if (urlMatch) {
             const readable = await fetchReadable(urlMatch[0]);
             if (readable) quickContext = `Source ${urlMatch[0]}
@@ -3518,7 +4070,7 @@ function createAgentRuntime(ipcMain2) {
 ${readable}`;
             quickHits = [{ title: urlMatch[0], url: urlMatch[0] }];
           } else {
-            const q = intent.query || userText.replace(/^\s*(?:please\s*)?(?:search|look up|find|check)\s*/i, "").trim();
+            const q = userText.replace(/^\s*(?:please\s*)?(?:search|look up|find|check)\s*/i, "").trim();
             const hits = await quickSearch(q, 3);
             if (hits.length > 0) {
               const top = hits[0];
@@ -3543,32 +4095,259 @@ ${quickContext}` }] : [],
         ...input.messages
       ];
       const rl = input.reasoningLevel ?? "medium";
-      const reasoningHint = `reasoning: ${rl}`;
+      const effortToTemp = rl === "high" ? 0.2 : rl === "low" ? 0.8 : 0.6;
+      const effortToTopP = rl === "high" ? 0.4 : rl === "low" ? 0.95 : 0.8;
+      const effortToPresence = rl === "high" ? -0.2 : rl === "low" ? 0.4 : 0.1;
+      const effortToFreq = rl === "high" ? -0.2 : rl === "low" ? 0.4 : 0.1;
+      const reasoningHint = `reasoning: ${rl}
+Reasoning Effort: ${rl}`;
       const systemIdx = guardedMessages.findIndex((m) => m.role === "system");
       if (systemIdx >= 0) guardedMessages[systemIdx] = { role: "system", content: guardedMessages[systemIdx].content + `
 ${reasoningHint}` };
-      const resp = await client.chat(guardedMessages, modelName, { temperature: input.temperature ?? (rl === "high" ? 0.2 : rl === "low" ? 0.8 : 0.6), stream: false });
-      const jj = await resp.json();
-      const contentAll = ((_d = (_c = (_b = jj == null ? void 0 : jj.choices) == null ? void 0 : _b[0]) == null ? void 0 : _c.message) == null ? void 0 : _d.content) ?? "";
-      const extract = (() => {
+      const doStream = input.stream !== false;
+      if (typeof modelName === "string" && modelName.startsWith("ollama:")) {
         try {
-          const tagFinal = contentAll.match(/<final>([\s\S]*?)<\/final>/i);
-          if (tagFinal == null ? void 0 : tagFinal[1]) return { content: tagFinal[1].trim(), thinking: contentAll.replace(/<final>[\s\S]*$/i, "").trim() };
-        } catch {
+          const base = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+          const userMax = typeof input.maxTokens === "number" ? input.maxTokens : void 0;
+          const userTopP = typeof input.topP === "number" ? input.topP : void 0;
+          const resp = await fetch(base + "/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: modelName.replace(/^ollama:/, ""),
+              messages: guardedMessages.map((m) => ({ role: m.role, content: m.content })),
+              stream: doStream,
+              think: showThinking,
+              options: {
+                temperature: input.temperature ?? effortToTemp,
+                top_p: userTopP ?? effortToTopP,
+                presence_penalty: effortToPresence,
+                frequency_penalty: effortToFreq,
+                num_predict: userMax ?? 512
+              }
+            })
+          });
+          if (!resp.ok) {
+            const msg = await resp.text().catch(() => "");
+            return { success: false, error: `Ollama HTTP ${resp.status}: ${msg.slice(0, 200)}`, content: "" };
+          }
+          if (doStream && resp.body) {
+            const reader = resp.body.getReader ? resp.body.getReader() : null;
+            let raw = "";
+            let rawThinking = "";
+            let buffer = "";
+            const decoder = new TextDecoder();
+            async function flush() {
+              let thinkingOut = rawThinking;
+              let answerOut = raw;
+              try {
+                if (!thinkingOut) {
+                  const thinkMatch = answerOut.match(/<think>([\s\S]*?)<\/think>/i);
+                  if (thinkMatch == null ? void 0 : thinkMatch[1]) {
+                    thinkingOut = (thinkingOut + thinkMatch[1]).trim();
+                    answerOut = answerOut.replace(/<think>[\s\S]*?<\/think>/i, "").trim();
+                  }
+                }
+              } catch {
+              }
+              if (showThinking && input.thinkingId) {
+                eventBus.emit("event", { type: "stream_thinking", id: input.thinkingId, content: thinkingOut });
+              }
+              if (input.answerId) {
+                eventBus.emit("event", { type: "stream_answer", id: input.answerId, content: answerOut });
+              }
+            }
+            if (reader) {
+              while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                const text = decoder.decode(value, { stream: true });
+                buffer += text;
+                const lines = buffer.split(/\n/);
+                buffer = lines.pop() || "";
+                for (const line of lines) {
+                  const trimmed = line.trim();
+                  if (!trimmed) continue;
+                  try {
+                    const obj = JSON.parse(trimmed);
+                    const piece = String(((_b = obj == null ? void 0 : obj.message) == null ? void 0 : _b.content) || "");
+                    const thinkPiece = String(((_c = obj == null ? void 0 : obj.message) == null ? void 0 : _c.thinking) ?? (obj == null ? void 0 : obj.thinking) ?? "");
+                    if (piece) raw += piece;
+                    if (thinkPiece) rawThinking += thinkPiece;
+                    await flush();
+                  } catch {
+                  }
+                }
+              }
+              await flush();
+              let finalThinking = rawThinking;
+              let finalAnswer = raw;
+              try {
+                if (!finalThinking) {
+                  const finalThinkMatch = raw.match(/<think>([\s\S]*?)<\/think>/i);
+                  finalThinking = ((_d = finalThinkMatch == null ? void 0 : finalThinkMatch[1]) == null ? void 0 : _d.trim()) || "";
+                  finalAnswer = raw.replace(/<think>[\s\S]*?<\/think>/i, "").trim();
+                }
+              } catch {
+              }
+              return { success: true, content: finalAnswer, model: modelName, links: quickHits == null ? void 0 : quickHits.slice(0, 3), thinking: showThinking ? finalThinking : "" };
+            } else {
+              const text = await resp.text();
+              try {
+                const jj = JSON.parse(text);
+                raw = String(((_e = jj == null ? void 0 : jj.message) == null ? void 0 : _e.content) || "");
+                rawThinking = String(((_f = jj == null ? void 0 : jj.message) == null ? void 0 : _f.thinking) ?? (jj == null ? void 0 : jj.thinking) ?? "");
+              } catch {
+                raw = text;
+              }
+              let thinking = rawThinking;
+              let answer = raw;
+              try {
+                if (!thinking) {
+                  const m = raw.match(/<think>([\s\S]*?)<\/think>/i);
+                  thinking = ((_g = m == null ? void 0 : m[1]) == null ? void 0 : _g.trim()) || "";
+                  answer = raw.replace(/<think>[\s\S]*?<\/think>/i, "").trim();
+                }
+              } catch {
+              }
+              if (showThinking && input.thinkingId && thinking) eventBus.emit("event", { type: "stream_thinking", id: input.thinkingId, content: thinking });
+              return { success: true, content: answer, model: modelName, links: quickHits == null ? void 0 : quickHits.slice(0, 3), thinking: showThinking ? thinking : "" };
+            }
+          } else {
+            const jj = await resp.json();
+            let content = String(((_h = jj == null ? void 0 : jj.message) == null ? void 0 : _h.content) || "");
+            let thinking = String(((_i = jj == null ? void 0 : jj.message) == null ? void 0 : _i.thinking) ?? (jj == null ? void 0 : jj.thinking) ?? "");
+            try {
+              if (!thinking) {
+                const m = content.match(/<think>([\s\S]*?)<\/think>/i);
+                if (m && m[1]) {
+                  thinking = m[1].trim();
+                  content = content.replace(/<think>[\s\S]*?<\/think>/i, "").trim();
+                }
+              }
+            } catch {
+            }
+            if (showThinking && input.thinkingId && thinking) {
+              eventBus.emit("event", { type: "stream_thinking", id: input.thinkingId, content: thinking });
+            }
+            return { success: true, content, model: modelName, links: quickHits == null ? void 0 : quickHits.slice(0, 3), thinking: showThinking ? thinking : "" };
+          }
+        } catch (error) {
+          return { success: false, error: error instanceof Error ? error.message : "Ollama error", content: "" };
         }
-        return { content: contentAll.trim(), thinking: "" };
-      })();
-      let cleaned = extract.content;
-      cleaned = cleaned.replace(/<\|[^>]+\|>/g, "");
-      cleaned = cleaned.replace(/^\s*commentary\s+to=[^\n]*$/gim, "");
-      cleaned = cleaned.replace(/^\s*code\s*\{[\s\S]*$/gim, "");
-      return {
-        success: true,
-        content: cleaned,
-        model: modelName,
-        links: quickHits == null ? void 0 : quickHits.slice(0, 3),
-        thinking: showThinking ? extract.thinking : ""
-      };
+      }
+      if (doStream) {
+        const resp = await client.chat(guardedMessages, modelName, {
+          temperature: input.temperature ?? effortToTemp,
+          topP: effortToTopP,
+          presencePenalty: effortToPresence,
+          frequencyPenalty: effortToFreq,
+          stream: true,
+          reasoningEffort: rl,
+          maxTokens: typeof input.maxTokens === "number" ? input.maxTokens : 512
+        });
+        let answer = "";
+        let thinking = "";
+        let rawAllContent = "";
+        const body = resp.body;
+        const decoder = new TextDecoder();
+        let buffer = "";
+        async function handleText(text) {
+          var _a2, _b2;
+          buffer += text;
+          const events = buffer.split(/\n\n/);
+          buffer = events.pop() || "";
+          for (const evt of events) {
+            const dataLines = evt.split(/\n/).filter((l) => l.startsWith("data:"));
+            const payload = dataLines.map((l) => l.replace(/^data:\s*/, "")).join("\n").trim();
+            if (!payload || payload === "[DONE]") continue;
+            try {
+              const delta = JSON.parse(payload);
+              const piece = ((_b2 = (_a2 = delta == null ? void 0 : delta.choices) == null ? void 0 : _a2[0]) == null ? void 0 : _b2.delta) || {};
+              if (typeof (piece == null ? void 0 : piece.reasoning_content) === "string") {
+                thinking += piece.reasoning_content;
+              }
+              if (typeof (piece == null ? void 0 : piece.content) === "string") {
+                rawAllContent += piece.content;
+              }
+              let derivedThinking = "";
+              let derivedAnswer = rawAllContent;
+              try {
+                const closedSegments = derivedAnswer.match(/<think>[\s\S]*?<\/think>/g) || [];
+                derivedThinking = closedSegments.map((s) => s.replace(/^<think>/i, "").replace(/<\/think>$/i, "").slice(0)).join("");
+                const lastOpen = derivedAnswer.lastIndexOf("<think>");
+                const lastClose = derivedAnswer.lastIndexOf("</think>");
+                if (lastOpen > -1 && lastOpen > lastClose) {
+                  derivedThinking += derivedAnswer.slice(lastOpen + 7);
+                }
+                derivedAnswer = derivedAnswer.replace(/<think>[\s\S]*?<\/think>/g, "");
+                if (lastOpen > -1 && lastOpen > lastClose) {
+                  derivedAnswer = derivedAnswer.slice(0, lastOpen);
+                }
+              } catch {
+              }
+              const combinedThinking = (thinking + derivedThinking).trim();
+              if (showThinking && input.thinkingId) {
+                eventBus.emit("event", { type: "stream_thinking", id: input.thinkingId, content: combinedThinking });
+              }
+              answer = derivedAnswer;
+              if (input.answerId) {
+                eventBus.emit("event", { type: "stream_answer", id: input.answerId, content: answer });
+              }
+            } catch {
+            }
+          }
+        }
+        if (body == null ? void 0 : body.getReader) {
+          const reader = body.getReader();
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            await handleText(decoder.decode(value, { stream: true }));
+          }
+        } else if (body) {
+          for await (const chunk of body) {
+            await handleText(decoder.decode(chunk, { stream: true }));
+          }
+        }
+        return { success: true, content: answer.trim(), model: modelName, links: quickHits == null ? void 0 : quickHits.slice(0, 3), thinking: showThinking ? thinking : "" };
+      } else {
+        const resp = await client.chat(
+          guardedMessages,
+          modelName,
+          {
+            temperature: input.temperature ?? effortToTemp,
+            topP: effortToTopP,
+            presencePenalty: effortToPresence,
+            frequencyPenalty: effortToFreq,
+            stream: false,
+            reasoningEffort: rl,
+            maxTokens: typeof input.maxTokens === "number" ? input.maxTokens : 512
+          }
+        );
+        const jj = await resp.json();
+        const contentAll = ((_l = (_k = (_j = jj == null ? void 0 : jj.choices) == null ? void 0 : _j[0]) == null ? void 0 : _k.message) == null ? void 0 : _l.content) ?? "";
+        const reasoningSeparated = ((_o = (_n = (_m = jj == null ? void 0 : jj.choices) == null ? void 0 : _m[0]) == null ? void 0 : _n.message) == null ? void 0 : _o.reasoning_content) || "";
+        const extract = (() => {
+          try {
+            const tagFinal = contentAll.match(/<final>([\s\S]*?)<\/final>/i);
+            if (tagFinal == null ? void 0 : tagFinal[1]) return { content: tagFinal[1].trim(), thinking: contentAll.replace(/<final>[\s\S]*$/i, "").trim() };
+          } catch {
+          }
+          return { content: contentAll.trim(), thinking: "" };
+        })();
+        let cleaned = extract.content;
+        cleaned = cleaned.replace(/<\|[^>]+\|>/g, "");
+        cleaned = cleaned.replace(/^\s*commentary\s+to=[^\n]*$/gim, "");
+        cleaned = cleaned.replace(/^\s*code\s*\{[\s\S]*$/gim, "");
+        return {
+          success: true,
+          content: cleaned,
+          model: modelName,
+          links: quickHits == null ? void 0 : quickHits.slice(0, 3),
+          thinking: showThinking ? reasoningSeparated || extract.thinking : ""
+        };
+      }
     } catch (error) {
       return {
         success: false,

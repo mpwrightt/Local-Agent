@@ -2,11 +2,13 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('agent', {
   startTask: (input: { prompt: string; model?: string; deep?: boolean; dryRun?: boolean; automation?: boolean }) => ipcRenderer.invoke('agent/startTask', input),
-  simpleChat: (input: { messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>; model?: string; temperature?: number; reasoningLevel?: 'low' | 'medium' | 'high'; searchEnabled?: boolean; showThinking?: boolean }) => ipcRenderer.invoke('agent/simpleChat', input),
+  simpleChat: (input: { messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>; model?: string; temperature?: number; reasoningLevel?: 'low' | 'medium' | 'high'; searchEnabled?: boolean; showThinking?: boolean; maxTokens?: number; stream?: boolean; answerId?: string; thinkingId?: string }) => ipcRenderer.invoke('agent/simpleChat', input),
   getHistory: (input: { sessionId?: string }) => ipcRenderer.invoke('agent/getHistory', input),
   confirmDangerous: (input: { runId: string; taskId: string; confirm: boolean }) => ipcRenderer.invoke('agent/confirmDangerous', input),
       cancelRun: (input: { runId: string }) => ipcRenderer.invoke('agent/cancelRun', input),
     setDefaultModel: (input: { model: string }) => ipcRenderer.invoke('agent/setDefaultModel', input),
+    getVisualizerVariant: () => ipcRenderer.invoke('agent/getVisualizerVariant'),
+    setVisualizerVariant: (input: { variant: string }) => ipcRenderer.invoke('agent/setVisualizerVariant', input),
     openPath: (input: { path: string }) => ipcRenderer.invoke('agent/openPath', input),
     revealInFolder: (input: { path: string }) => ipcRenderer.invoke('agent/revealInFolder', input),
     saveUploadedImage: (input: { dataUrl: string; fileName: string }) => ipcRenderer.invoke('agent/saveUploadedImage', input),
@@ -18,23 +20,31 @@ contextBridge.exposeInMainWorld('agent', {
   },
   voiceTTS: (input: { text: string; voiceId?: string; modelId?: string }) => ipcRenderer.invoke('agent/voiceTTS', input),
   listVoices: () => ipcRenderer.invoke('agent/elevenVoices'),
+  speechToText: (input: { audioBase64: string; mimeType?: string; fileName?: string }) => ipcRenderer.invoke('agent/speechToText', input),
+  listModels: () => ipcRenderer.invoke('agent/listModels'),
+  getDefaultModel: () => ipcRenderer.invoke('agent/getDefaultModel'),
 })
 
 declare global {
   interface Window {
     agent: {
       startTask: (input: { prompt: string; model?: string; deep?: boolean; dryRun?: boolean; automation?: boolean }) => Promise<{ runId: string }>
-      simpleChat: (input: { messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>; model?: string; temperature?: number; reasoningLevel?: 'low' | 'medium' | 'high'; searchEnabled?: boolean; showThinking?: boolean }) => Promise<{ success: boolean; content: string; error?: string; model?: string; links?: Array<{ title: string; url: string; snippet?: string }>; thinking?: string }>
+      simpleChat: (input: { messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>; model?: string; temperature?: number; reasoningLevel?: 'low' | 'medium' | 'high'; searchEnabled?: boolean; showThinking?: boolean; maxTokens?: number; stream?: boolean; answerId?: string; thinkingId?: string }) => Promise<{ success: boolean; content: string; error?: string; model?: string; links?: Array<{ title: string; url: string; snippet?: string }>; thinking?: string }>
       getHistory: (input: { sessionId?: string }) => Promise<any>
       confirmDangerous: (input: { runId: string; taskId: string; confirm: boolean }) => Promise<void>
       cancelRun: (input: { runId: string }) => Promise<void>
           setDefaultModel: (input: { model: string }) => Promise<void>
+      getVisualizerVariant: () => Promise<{ variant: string }>
+      setVisualizerVariant: (input: { variant: string }) => Promise<void>
+      listModels: () => Promise<string[]>
+      getDefaultModel: () => Promise<{ model?: string }>
       openPath: (input: { path: string }) => Promise<void>
       revealInFolder: (input: { path: string }) => Promise<void>
       readFileText: (input: { path: string }) => Promise<{ success: boolean; content?: string; error?: string }>
       onEvent: (handler: (event: any) => void) => () => void
       voiceTTS: (input: { text: string; voiceId?: string; modelId?: string }) => Promise<{ success: boolean; audioBase64?: string; error?: string; format?: string }>
       listVoices: () => Promise<{ success: boolean; voices?: Array<{ id: string; name: string; category?: string; labels?: Record<string,string> }>; error?: string }>
+      speechToText: (input: { audioBase64: string; mimeType?: string; fileName?: string }) => Promise<{ success: boolean; text?: string; error?: string }>
     }
   }
 }

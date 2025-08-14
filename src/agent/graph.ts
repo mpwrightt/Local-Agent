@@ -64,7 +64,7 @@ export async function synthesizeNode(state: S) {
   }
   
   // Get model name
-  let model = process.env.LMSTUDIO_MODEL ?? 'local-model'
+  let model = process.env.LMSTUDIO_MODEL ?? (process.env.OLLAMA_MODEL ? (process.env.OLLAMA_MODEL.startsWith('ollama:') ? process.env.OLLAMA_MODEL : `ollama:${process.env.OLLAMA_MODEL}`) : 'local-model')
   try {
     const doFetch = await getFetch()
     const resp = await doFetch(baseURL.replace(/\/$/, '') + '/models')

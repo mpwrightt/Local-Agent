@@ -8,6 +8,7 @@ interface Ctx {
   sessionId: string
   task: { id: string; title: string; description: string }
   automation?: boolean
+  signal?: AbortSignal
 }
 
 type ParsedShell = { cmd: string; meta?: any }
@@ -24,7 +25,14 @@ function parseCommandFromDescription(desc: string): ParsedShell | null {
 
 function isWhitelisted(cmd: string): boolean {
   const first = cmd.trim().split(/\s+/)[0]
-  const whitelist = new Set(['git', 'ls', 'cat', 'echo', 'pwd', 'open', 'osascript', 'killall'])
+  const whitelist = new Set([
+    // cross-platform basics
+    'git', 'ls', 'cat', 'echo', 'pwd',
+    // macOS helpers
+    'open', 'osascript', 'killall',
+    // Windows helpers (PowerShell and cmd)
+    'Start-Process', 'Get-Process', 'Stop-Process', 'taskkill', 'cmd', 'powershell', 'Add-Type'
+  ])
   return whitelist.has(first)
 }
 
@@ -33,7 +41,22 @@ export async function spawnShellAgent(ctx: Ctx) {
   if (!parsed) {
     throw new Error('No shell command provided')
   }
-  const cmd = parsed.cmd
+  let cmd = parsed.cmd
+  // Normalize simple app open/quit for Windows
+  if (process.platform === 'win32') {
+    // open -a "App" → Start-Process "App"
+    const openMatch = cmd.match(/^open\s+-a\s+"([^"]+)"/i)
+    if (openMatch) {
+      const app = openMatch[1].replace('"', '""')
+      cmd = `Start-Process -FilePath \"${app}\"`
+    }
+    // osascript quit → Stop-Process
+    const osaQuit = cmd.match(/^osascript\b.+?tell application \"([^\"]+)\" to quit/i)
+    if (osaQuit) {
+      const app = osaQuit[1].replace('"', '""')
+      cmd = `Get-Process -Name \"${app}\" -ErrorAction SilentlyContinue | Stop-Process -Force`
+    }
+  }
   const meta = parsed.meta
   const whitelisted = isWhitelisted(cmd)
   if (!whitelisted && !ctx.automation) {
@@ -48,13 +71,29 @@ export async function spawnShellAgent(ctx: Ctx) {
   if (meta && meta.kind === 'slack_dm') {
     db.addRunEvent(ctx.runId, { type: 'dm_hint', taskId: ctx.task.id, to: meta.to, message: meta.message })
   }
-  const shellBin = process.env.SHELL || '/bin/zsh'
+  const shellBin = process.platform === 'win32'
+    ? 'powershell.exe'
+    : (process.env.SHELL || '/bin/zsh')
   const home = os.homedir()
 
   return await new Promise<{ exitCode: number; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(shellBin, ['-lc', cmd], { cwd: home, env: process.env })
+    const args = process.platform === 'win32'
+      ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', cmd]
+      : ['-lc', cmd]
+    const child = spawn(shellBin, args, { cwd: home, env: process.env })
     let out = ''
     let err = ''
+    let aborted = false
+    const onAbort = () => {
+      if (aborted) return
+      aborted = true
+      try { db.addRunEvent(ctx.runId, { type: 'shell_cancelled', taskId: ctx.task.id, cmd }) } catch {}
+      try { child.kill('SIGTERM') } catch {}
+      // Fallback hard kill shortly after if still running
+      setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 500)
+    }
+    if (ctx.signal?.aborted) onAbort()
+    ctx.signal?.addEventListener('abort', onAbort)
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', (chunk: string) => {
@@ -73,10 +112,18 @@ export async function spawnShellAgent(ctx: Ctx) {
       const exitCode = typeof code === 'number' ? code : -1
       db.addRunEvent(ctx.runId, { type: 'shell_end', taskId: ctx.task.id, exitCode })
       // Emit friendly domain events for known automations
-      if (exitCode === 0 && meta && meta.kind === 'slack_dm') {
+      if (!aborted && exitCode === 0 && meta && meta.kind === 'slack_dm') {
         db.addRunEvent(ctx.runId, { type: 'dm_sent', taskId: ctx.task.id, to: meta.to, message: meta.message })
       }
-      resolve({ exitCode, stdout: out, stderr: err })
+      if (aborted) {
+        reject(new Error('Cancelled'))
+      } else {
+        resolve({ exitCode, stdout: out, stderr: err })
+      }
+    })
+    // Cleanup abort listener when done
+    child.on('close', () => {
+      try { ctx.signal?.removeEventListener('abort', onAbort) } catch {}
     })
   })
 }

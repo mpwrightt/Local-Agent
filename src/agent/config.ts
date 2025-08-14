@@ -9,6 +9,7 @@ const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json')
 export type AppConfig = {
   defaultModel?: string
   retentionDays?: number
+  visualizerVariant?: string
 }
 
 export function readConfig(): AppConfig {
@@ -40,6 +41,16 @@ export function setDefaultModel(model: string) {
 export function getRetentionDays(): number {
   const d = readConfig().retentionDays
   return typeof d === 'number' && d > 0 ? d : 14
+}
+
+export function getVisualizerVariant(): string {
+  return readConfig().visualizerVariant || 'halo'
+}
+
+export function setVisualizerVariant(variant: string) {
+  const cfg = readConfig()
+  cfg.visualizerVariant = variant
+  writeConfig(cfg)
 }
 
 

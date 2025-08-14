@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { selectModel } from './task_planner'
 
 // Inline mirror of the app-open detector for a quick unit test, kept in sync with task_planner.ts
 function detectAppOpen(prompt: string) {
@@ -56,6 +57,35 @@ describe('fuzzy similarity for app names', () => {
     const cand = normalizeForCompare('Slack')
     const score = similarity(input, cand)
     expect(score).toBeGreaterThanOrEqual(0.6)
+  })
+})
+
+describe('selectModel (env overrides)', () => {
+  it('prefers LMSTUDIO_MODEL when set', async () => {
+    const origLMS = process.env.LMSTUDIO_MODEL
+    const origO = process.env.OLLAMA_MODEL
+    try {
+      process.env.LMSTUDIO_MODEL = 'openai/gpt-oss-20b'
+      process.env.OLLAMA_MODEL = 'llama3.1:8b'
+      const model = await selectModel({ models: { list: async () => ({ data: [] }) } } as any)
+      expect(model).toBe('openai/gpt-oss-20b')
+    } finally {
+      process.env.LMSTUDIO_MODEL = origLMS
+      process.env.OLLAMA_MODEL = origO
+    }
+  })
+  it('falls back to OLLAMA_MODEL when LMSTUDIO_MODEL is not set', async () => {
+    const origLMS = process.env.LMSTUDIO_MODEL
+    const origO = process.env.OLLAMA_MODEL
+    try {
+      delete process.env.LMSTUDIO_MODEL
+      process.env.OLLAMA_MODEL = 'llama3.1:8b'
+      const model = await selectModel({ models: { list: async () => ({ data: [] }) } } as any)
+      expect(model).toBe('ollama:llama3.1:8b')
+    } finally {
+      process.env.LMSTUDIO_MODEL = origLMS
+      process.env.OLLAMA_MODEL = origO
+    }
   })
 })
 

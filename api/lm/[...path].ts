@@ -31,8 +31,43 @@ export default async function handler(req: any, res: any) {
   let body: any = undefined
   if (method !== 'GET' && method !== 'HEAD') {
     if (req.body && typeof req.body === 'object' && !(req.body instanceof Buffer)) {
+      // Gateway: forward reasoning effort to LM Studio in the correct format
+      const isChat = /\/v1\/chat\/completions$/.test(`/${rawPath}`)
+      let payload: any = req.body
+      if (isChat) {
+        try {
+          const effort = (payload?.reasoning?.effort
+            || payload?.reasoning_effort
+            || req.headers['x-reasoning-effort']
+            || null) as 'low' | 'medium' | 'high' | null
+          
+          if (effort) {
+            // Use ONLY the format that worked in direct curl tests
+            payload = {
+              ...payload,
+              reasoning_effort: effort  // This is the ONLY format that actually works with LM Studio
+            }
+            
+            // Remove any conflicting reasoning parameters that might override
+            if (payload.reasoning) {
+              delete payload.reasoning
+            }
+            
+            // Debug logging to see exactly what we're sending to LM Studio
+            console.log(`[API Proxy] Forwarding reasoning effort: ${effort}`)
+            console.log(`[API Proxy] Request to LM Studio:`, JSON.stringify({
+              model: payload.model,
+              messages: Array.isArray(payload.messages) ? `[${payload.messages.length} messages]` : payload.messages,
+              reasoning_effort: payload.reasoning_effort,
+              temperature: payload.temperature
+            }, null, 2))
+          }
+        } catch (e) {
+          console.error('[API Proxy] Error processing reasoning effort:', e)
+        }
+      }
       headers['content-type'] = headers['content-type'] || 'application/json'
-      body = JSON.stringify(req.body)
+      body = JSON.stringify(payload)
     } else {
       body = req.body
     }

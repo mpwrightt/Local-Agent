@@ -14,10 +14,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Component Commands
 - `npm run dev:main` - Compile Electron main/preload processes in watch mode
 - `npm run dev:electron` - Start Electron after waiting for Vite server and compiled files
+- `npm run agent:serve` - Start the agent web server
+- `npm run tunnel` - Start ngrok tunnel for remote access
+- `npm run rebuild` - Rebuild native dependencies (better-sqlite3)
+- `npm run postinstall` - Auto-rebuild after package installation
 
 ## Architecture Overview
 
-This is an **Electron-based local AI agent application** with a React frontend that orchestrates AI tasks through a local LLM via Ollama.
+This is an **Electron-based local AI agent application** with a React frontend that orchestrates AI tasks through a local LLM via LM Studio.
 
 ### Core Components
 
@@ -34,13 +38,15 @@ This is an **Electron-based local AI agent application** with a React frontend t
 **Agent Runtime (`src/agent/`)**
 - `runtime.ts` - IPC handlers for starting tasks and retrieving history
 - `scheduler.ts` - Task orchestrator that executes planned tasks in dependency order
-- `task_planner.ts` - Uses local Ollama to break user prompts into executable task DAGs
+- `task_planner.ts` - Uses local LM Studio to break user prompts into executable task DAGs
 - `event_bus.ts` - Event system for real-time UI updates
 - `ipc_bridge.ts` - Forwards agent events to the React frontend
 
 **Agent Workers (`src/agent/workers/`)**
-- `research.ts` - Handles web research tasks
-- `fileops.ts` - Handles local file operations
+- `research.ts` - Handles web research tasks via Playwright automation
+- `fileops.ts` - Local file operations, search, OCR processing with Tesseract
+- `shell.ts` - Terminal command execution for system automation
+- `ocr.ts` - Optical character recognition for image text extraction
 - Modular system allows easy addition of new worker types
 
 **Data Layer**
@@ -59,11 +65,14 @@ This is an **Electron-based local AI agent application** with a React frontend t
 
 ### Key Dependencies
 
-- **Ollama** - Local LLM integration for task planning and execution
+- **LM Studio** - Local LLM integration for task planning and execution
 - **better-sqlite3** - High-performance SQLite database
 - **Playwright** - Web automation for research tasks
+- **Tesseract.js** - OCR text extraction from images
 - **Zod** - Runtime type validation for task schemas
 - **Pino** - Structured logging
+- **LangChain/LangGraph** - LLM orchestration and graph-based workflows
+- **ElevenLabs** - Text-to-speech voice synthesis integration
 
 ### Development Notes
 
@@ -75,7 +84,41 @@ This is an **Electron-based local AI agent application** with a React frontend t
 
 ### Environment Setup
 
-- Requires Ollama running locally (default: `http://127.0.0.1:11434`)
-- Set `OLLAMA_MODEL` environment variable to override model selection
-- Set `OLLAMA_HOST` to use different Ollama instance
+- Requires LM Studio running locally (default: `http://127.0.0.1:1234`)
+- Set `LMSTUDIO_MODEL` environment variable to override model selection
+- Set `LMSTUDIO_HOST` to use different LM Studio instance
+- Set `ELEVENLABS_API_KEY` for voice features or add to `keys.md` file
 - Development server runs on port 5173 (configurable in vite.config.ts)
+
+### Testing and Quality
+
+- **Vitest** - Unit testing framework
+- **Testing Library** - React component testing utilities
+- **ESLint** - Code linting with TypeScript and React rules
+- Run tests with `npm test` (if test script exists)
+- Use `npm run lint` to check code quality
+
+### Agent Capabilities
+
+The agent supports three main modes:
+
+1. **Chat Mode** - Direct LLM conversation with optional web search integration
+2. **Tasks Mode** - Automation capabilities including:
+   - File operations (create, move, rename, search)
+   - Shell command execution
+   - OCR text extraction from images
+   - macOS app control (open, quit, focus applications)
+   - Image upload and analysis
+
+3. **Research Mode** - Deep web research with:
+   - Multi-source information gathering via Playwright
+   - Content synthesis and analysis
+   - Structured report generation
+   - Source citation and verification
+
+### Remote Deployment
+
+The application supports remote deployment via:
+- Vercel proxy at `api/lm/[...path].ts` for CORS-free LM Studio access
+- ngrok tunneling for remote agent service access
+- Optional web-only mode for basic chat functionality

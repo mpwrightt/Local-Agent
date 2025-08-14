@@ -20,6 +20,11 @@ export async function selectModel(client: OpenAI): Promise<string> {
   if (process.env.LMSTUDIO_MODEL && process.env.LMSTUDIO_MODEL.length > 0) {
     return process.env.LMSTUDIO_MODEL
   }
+  if (process.env.OLLAMA_MODEL && process.env.OLLAMA_MODEL.length > 0) {
+    // Prefix to signal Ollama routing in runtime
+    const name = process.env.OLLAMA_MODEL
+    return name.startsWith('ollama:') ? name : `ollama:${name}`
+  }
   try {
     const list = await client.models.list()
     const names = list.data.map((m: any) => m.id)
@@ -31,6 +36,81 @@ export async function selectModel(client: OpenAI): Promise<string> {
   } catch {}
   // Default fallback model name
   return 'local-model'
+}
+
+// LLM-powered intent router for broad phrasing coverage
+async function routeIntentLLM(prompt: string, model: string): Promise<null | {
+  op: string
+  name?: string
+  scope?: string
+  listType?: 'files' | 'folders'
+  src?: string
+  dest?: string
+  action?: 'open' | 'reveal'
+  text?: string
+  cmd?: string
+}> {
+  try {
+    const isOllama = typeof model === 'string' && model.startsWith('ollama:')
+    const sys = [
+      'You are an intent router for a macOS local assistant.',
+      'Return STRICT JSON only, no prose.',
+      'Schema:',
+      '{"op":"locate|list|open|reveal|mkdir|rename|move|copy|open_app|quit_app|focus_app|hide_app|restart_app|ocr_search|shell|none"',
+      ',"name?":string, "scope?":"desktop|documents|downloads|pictures|any"',
+      ',"listType?":"files|folders"',
+      ',"src?":string, "dest?":string, "action?":"open|reveal"',
+      ',"text?":string, "cmd?":string}',
+      'Rules: prefer concise fields; infer scope if user mentions a location; for list intents set op="list" with listType; if the user asks to search images by text, set op="ocr_search" and text to the phrase; if no actionable intent, set op="none".'
+    ].join(' ')
+    if (isOllama) {
+      const base = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '')
+      const r = await fetch(base + '/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: model.replace(/^ollama:/, ''),
+          stream: false,
+          options: { temperature: 0.1, num_predict: 300 },
+          messages: [
+            { role: 'system', content: sys },
+            { role: 'user', content: prompt }
+          ]
+        })
+      })
+      if (!r.ok) return null
+      const j: any = await r.json()
+      const content = j?.message?.content
+      if (!content || typeof content !== 'string') return null
+      const parsed = JSON.parse(content)
+      if (parsed && typeof parsed.op === 'string') return parsed
+    } else {
+      const baseURL = process.env.LMSTUDIO_HOST ?? 'http://127.0.0.1:1234/v1'
+      const body: any = {
+        model,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.1,
+        max_tokens: 300,
+        response_format: { type: 'json_object' },
+        reasoning: { effort: 'medium' }
+      }
+      const r = await fetch(baseURL.replace(/\/$/, '') + '/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+      if (!r.ok) return null
+      const j: any = await r.json()
+      const content = j?.choices?.[0]?.message?.content
+      if (!content || typeof content !== 'string') return null
+      const parsed = JSON.parse(content)
+      if (parsed && typeof parsed.op === 'string') return parsed
+    }
+  } catch {}
+  return null
 }
 
 // Detect local file/folder locate intent
@@ -45,12 +125,32 @@ function detectLocateTask(prompt: string): PlannedTask[] | null {
       ]
     }
   } catch {}
+  // Prefer an explicitly quoted target near naming phrases
+  if (/\b(file|folder)\b/i.test(p)) {
+    const nearNamed = p.match(/(?:named|called|something\s+like)\s+["']([^"']+)["']/i)
+    if (nearNamed && nearNamed[1]) {
+      const scopeWord = (p.match(/\bon\s+(?:my\s+)?(desktop|documents|downloads|pictures)\b/i)?.[1] || '').toLowerCase()
+      const scope = ['desktop','documents','downloads','pictures'].includes(scopeWord) ? scopeWord : 'any'
+      const payload = { op: 'locate', name: nearNamed[1].trim(), scope, originalPrompt: p }
+      return [ { id: 'locate', title: 'Locate file/folder', description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} } ]
+    }
+    // If any quoted phrase exists, use the last one as the strongest hint
+    const quotes = Array.from(p.matchAll(/["']([^"']+)["']/g))
+    if (quotes.length > 0) {
+      const name = quotes[quotes.length - 1][1].trim()
+      const scopeWord = (p.match(/\bon\s+(?:my\s+)?(desktop|documents|downloads|pictures)\b/i)?.[1] || '').toLowerCase()
+      const scope = ['desktop','documents','downloads','pictures'].includes(scopeWord) ? scopeWord : 'any'
+      const payload = { op: 'locate', name, scope, originalPrompt: p }
+      return [ { id: 'locate', title: 'Locate file/folder', description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} } ]
+    }
+  }
+
   // Natural language patterns - enhanced to catch more conversational requests
   const patterns: RegExp[] = [
     // Direct requests
-    /where\s+is\s+(?:the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
-    /find\s+(?:the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
-    /locate\s+(?:the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
+    /where\s+is\s+(?:a|the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(?:my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
+    /find\s+(?:a|the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(?:my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
+    /locate\s+(?:a|the\s+)?(?:file|folder)?\s*(?:named\s+)?["']?(.+?)["']?(?:\s+on\s+(?:my\s+)?(desktop|documents|downloads|laptop|computer|mac))?\??$/i,
     // Conversational patterns
     /I\s+(?:think\s+)?(?:have|had)\s+a\s+(?:file|folder).*?(?:called|named).*?["'](.+?)["']/i,
     /(?:there's|there\s+is)\s+a\s+(?:file|folder).*?(?:called|named).*?["'](.+?)["']/i,
@@ -61,14 +161,14 @@ function detectLocateTask(prompt: string): PlannedTask[] | null {
     // Pattern without quotes for names with special characters (more precise)
     /(?:it's\s+called|named)\s+something\s+like\s+"([^"]+)"/i,
   ]
-  // High-level intents like "list files/folders on desktop"
-  const listFolders = p.match(/\b(list|show|find)\s+(?:all\s+)?(folders|directories)\s+(?:on\s+the\s+)?(desktop|documents|downloads|pictures)\b/i)
+  // High-level intents like "list files/folders in/on <scope>"
+  const listFolders = p.match(/\b(list|show|find)\s+(?:all\s+)?(folders|directories)\s+(?:in|on)\s+(?:the\s+)?(?:my\s+)?(desktop|documents|downloads|pictures)\b/i)
   if (listFolders) {
     const scope = (listFolders[3] || 'any').toLowerCase()
     const payload = { op: 'locate', name: '*', scope, listType: 'folders' }
     return [ { id: 'locate', title: 'List folders', description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} } ]
   }
-  const listFiles = p.match(/\b(list|show)\s+(?:all\s+)?files\s+(?:on\s+the\s+)?(desktop|documents|downloads|pictures)\b/i)
+  const listFiles = p.match(/\b(list|show)\s+(?:all\s+)?files\s+(?:in|on)\s+(?:the\s+)?(?:my\s+)?(desktop|documents|downloads|pictures)\b/i)
   if (listFiles) {
     const scope = (listFiles[2] || 'any').toLowerCase()
     const payload = { op: 'locate', name: '*', scope, listType: 'files' }
@@ -153,6 +253,18 @@ function detectLocateTask(prompt: string): PlannedTask[] | null {
       return [
         { id: 'locate', title, description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} },
       ]
+    }
+  }
+  // New: capture unquoted names after phrases like "named", "called", or "something like"
+  // Example: "Can you find a folder I think it was named something like it worked"
+  if (/\b(file|folder)\b/i.test(p)) {
+    const m = p.match(/(?:named|called|something\s+like)\s+([^"'\n]+?)(?:\s+on\s+(?:my\s+)?(desktop|documents|downloads|pictures)\b|[.!?]|$)/i)
+    if (m && m[1]) {
+      const extracted = m[1].trim().replace(/^\b(a|the)\b\s*/i, '')
+      const scopeWord = (m[2] || '').toLowerCase()
+      const scope = ['desktop', 'documents', 'downloads', 'pictures'].includes(scopeWord) ? scopeWord : 'any'
+      const payload = { op: 'locate', name: extracted, scope, originalPrompt: p }
+      return [ { id: 'locate', title: 'Locate file/folder', description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} } ]
     }
   }
   return null
@@ -502,6 +614,79 @@ export async function planTasks(prompt: string, modelOverride?: string, deep?: b
   if (renamePlan) return renamePlan
   const shellPlan = detectShellTask(prompt)
   if (shellPlan) return shellPlan
+
+  // LLM router fallback when automation is enabled: capture broad phrasings
+  if (automation) {
+    try {
+      const baseURL = process.env.LMSTUDIO_HOST ?? 'http://127.0.0.1:1234/v1'
+      const client: any = {
+        models: { list: async () => (await (await fetch(baseURL.replace(/\/$/, '') + '/models')).json()) }
+      }
+      let modelName = modelOverride ?? (await selectModel(client))
+      const routed = await routeIntentLLM(prompt, modelName)
+      if (routed && routed.op && routed.op !== 'none') {
+        switch (routed.op) {
+          case 'list': {
+            const scope = (routed.scope || 'any') as string
+            const listType = (routed.listType || 'folders') as 'files' | 'folders'
+            const payload = { op: 'locate', name: '*', scope, listType }
+            return [ { id: 'locate', title: `List ${listType}`, description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} } ]
+          }
+          case 'locate': {
+            const payload = { op: 'locate', name: routed.name || '*', scope: routed.scope || 'any', originalPrompt: prompt }
+            return [ { id: 'locate', title: 'Locate file/folder', description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} } ]
+          }
+          case 'ocr_search': {
+            const payload = { op: 'ocr_search', text: routed.text || '*', paths: [], originalPrompt: prompt }
+            return [ { id: 'ocr', title: 'Search images for text content', description: JSON.stringify(payload), role: 'fileops', deps: [], budgets: {} } ]
+          }
+          case 'mkdir': {
+            if (routed.name) return [ { id: 'mkdir', title: `Create folder ${routed.name}`, description: JSON.stringify({ op: 'mkdir', name: routed.name, scope: routed.scope || 'documents' }), role: 'fileops', deps: [], budgets: {} } ]
+            break
+          }
+          case 'rename': {
+            if (routed.src && routed.dest) return [ { id: 'rename', title: 'Rename file', description: JSON.stringify({ op: 'rename', src: routed.src, dest: routed.dest }), role: 'fileops', deps: [], budgets: {} } ]
+            break
+          }
+          case 'move': {
+            if (routed.src && routed.dest) return [ { id: 'move', title: 'Move item', description: JSON.stringify({ op: 'move', src: routed.src, dest: routed.dest }), role: 'fileops', deps: [], budgets: {} } ]
+            break
+          }
+          case 'copy': {
+            if (routed.src && routed.dest) return [ { id: 'copy', title: 'Copy item', description: JSON.stringify({ op: 'copy', src: routed.src, dest: routed.dest }), role: 'fileops', deps: [], budgets: {} } ]
+            break
+          }
+          case 'open_app': {
+            if (routed.name) return [ { id: 'open_app', title: `Open ${routed.name}`, description: JSON.stringify({ cmd: `open -a "${routed.name}"` }), role: 'shell', deps: [], budgets: {} } ]
+            break
+          }
+          case 'quit_app': {
+            if (routed.name) return [ { id: 'quit_app', title: `Quit ${routed.name}`, description: JSON.stringify({ cmd: `osascript -e 'tell application "${routed.name}" to quit'` }), role: 'shell', deps: [], budgets: {} } ]
+            break
+          }
+          case 'focus_app': {
+            if (routed.name) return [ { id: 'focus_app', title: `Focus ${routed.name}`, description: JSON.stringify({ cmd: `osascript -e 'tell application "${routed.name}" to activate'` }), role: 'shell', deps: [], budgets: {} } ]
+            break
+          }
+          case 'hide_app': {
+            if (routed.name) return [ { id: 'hide_app', title: `Hide ${routed.name}`, description: JSON.stringify({ cmd: `osascript -e 'tell application "${routed.name}" to hide'` }), role: 'shell', deps: [], budgets: {} } ]
+            break
+          }
+          case 'restart_app': {
+            if (routed.name) return [
+              { id: 'quit_app', title: `Quit ${routed.name}`, description: JSON.stringify({ cmd: `osascript -e 'tell application "${routed.name}" to quit'` }), role: 'shell', deps: [], budgets: {} },
+              { id: 'open_app', title: `Open ${routed.name}`, description: JSON.stringify({ cmd: `open -a "${routed.name}"` }), role: 'shell', deps: ['quit_app'], budgets: {} },
+            ]
+            break
+          }
+          case 'shell': {
+            if (routed.cmd) return [ { id: 'sh1', title: 'Run shell command', description: JSON.stringify({ cmd: routed.cmd }), role: 'shell', deps: [], budgets: {} } ]
+            break
+          }
+        }
+      }
+    } catch {}
+  }
   // Lightweight local plan via LM Studio. Keep token budget small for speed.
   const taskFocus = automation ? "Mac control, file operations, shell commands, browser automation" : "web research, information gathering, analysis, synthesis"
   const preferredRoles = automation ? "fileops (local file edits), shell (terminal commands), automation (browser/app control)" : "research (web), reviewer (analysis), fileops (summary writing)"
@@ -542,37 +727,85 @@ Respond with valid JSON only, no other text.`
       }
     }
   }
-  let res: any
   let modelName = modelOverride ?? (await selectModel(client))
+  let textFromLLM: string | null = null
+  const isOllama = typeof modelName === 'string' && modelName.startsWith('ollama:')
   try {
-    res = await client.chat.completions.create({
-      model: modelName,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.2,
-      max_tokens: 300,
-      response_format: { type: 'json_object' },
-    })
+    if (isOllama) {
+      const base = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '')
+      const r = await fetch(base + '/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: modelName.replace(/^ollama:/, ''),
+          stream: false,
+          options: { temperature: 0.2, num_predict: 600 },
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: prompt }
+          ]
+        })
+      })
+      if (r.ok) {
+        const j: any = await r.json()
+        textFromLLM = String(j?.message?.content || '')
+      }
+    } else {
+      const resp = await client.chat.completions.create({
+        model: modelName,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.2,
+        max_tokens: 300,
+        response_format: { type: 'json_object' },
+      })
+      textFromLLM = String(resp?.choices?.[0]?.message?.content ?? '')
+    }
   } catch (e) {
     // Try again with a simpler fallback
-    modelName = 'local-model'
-    res = await client.chat.completions.create({
-      model: modelName,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.2,
-      max_tokens: 300,
-    })
+    modelName = isOllama ? modelName : 'local-model'
+    if (isOllama) {
+      try {
+        const base = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '')
+        const r = await fetch(base + '/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: modelName.replace(/^ollama:/, ''),
+            stream: false,
+            options: { temperature: 0.2, num_predict: 500 },
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: prompt }
+            ]
+          })
+        })
+        if (r.ok) {
+          const j: any = await r.json()
+          textFromLLM = String(j?.message?.content || '')
+        }
+      } catch {}
+    } else {
+      try {
+        const resp = await client.chat.completions.create({
+          model: modelName,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.2,
+          max_tokens: 300,
+        })
+        textFromLLM = String(resp?.choices?.[0]?.message?.content ?? '')
+      } catch {}
+    }
   }
 
   let tasks: PlannedTask[] = []
   try {
-    const text = res.choices[0]?.message?.content ?? ''
-    const parsed = JSON.parse(text)
+    const parsed = JSON.parse(String(textFromLLM || ''))
     const maybeArray = Array.isArray(parsed) ? parsed : parsed.tasks
     tasks = z.array(TaskSchema).parse(maybeArray)
   } catch (e) {

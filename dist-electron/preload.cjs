@@ -7,6 +7,8 @@ import_electron.contextBridge.exposeInMainWorld("agent", {
   confirmDangerous: (input) => import_electron.ipcRenderer.invoke("agent/confirmDangerous", input),
   cancelRun: (input) => import_electron.ipcRenderer.invoke("agent/cancelRun", input),
   setDefaultModel: (input) => import_electron.ipcRenderer.invoke("agent/setDefaultModel", input),
+  getVisualizerVariant: () => import_electron.ipcRenderer.invoke("agent/getVisualizerVariant"),
+  setVisualizerVariant: (input) => import_electron.ipcRenderer.invoke("agent/setVisualizerVariant", input),
   openPath: (input) => import_electron.ipcRenderer.invoke("agent/openPath", input),
   revealInFolder: (input) => import_electron.ipcRenderer.invoke("agent/revealInFolder", input),
   saveUploadedImage: (input) => import_electron.ipcRenderer.invoke("agent/saveUploadedImage", input),
@@ -17,5 +19,8 @@ import_electron.contextBridge.exposeInMainWorld("agent", {
     return () => import_electron.ipcRenderer.removeListener("agent/event", listener);
   },
   voiceTTS: (input) => import_electron.ipcRenderer.invoke("agent/voiceTTS", input),
-  listVoices: () => import_electron.ipcRenderer.invoke("agent/elevenVoices")
+  listVoices: () => import_electron.ipcRenderer.invoke("agent/elevenVoices"),
+  speechToText: (input) => import_electron.ipcRenderer.invoke("agent/speechToText", input),
+  listModels: () => import_electron.ipcRenderer.invoke("agent/listModels"),
+  getDefaultModel: () => import_electron.ipcRenderer.invoke("agent/getDefaultModel")
 });
