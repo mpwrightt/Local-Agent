@@ -440,7 +440,10 @@ export function createAgentRuntime(ipcMain: IpcMain) {
       if (systemIdx >= 0) guardedMessages[systemIdx] = { role: 'system', content: guardedMessages[systemIdx].content + `\n${reasoningHint}` }
 
       // Streaming support: default ON for chat unless explicitly disabled via input or env
-      const doStream = (input as any).stream !== false && process.env.LM_DISABLE_STREAM !== '1'
+      // Windows may have issues with streaming, so provide a fallback
+      const doStream = (input as any).stream !== false && 
+                       process.env.LM_DISABLE_STREAM !== '1' && 
+                       process.env.LM_FORCE_NON_STREAM !== '1'
       // Ollama path (supports streaming)
       if (typeof modelName === 'string' && modelName.startsWith('ollama:')) {
         try {
@@ -647,8 +650,21 @@ export function createAgentRuntime(ipcMain: IpcMain) {
             await handleText(decoder.decode(value, { stream: true }))
           }
         } else if (body) {
-          for await (const chunk of body as any) {
-            await handleText(decoder.decode(chunk, { stream: true }))
+          // Windows fallback: try different streaming approaches
+          try {
+            for await (const chunk of body as any) {
+              await handleText(decoder.decode(chunk, { stream: true }))
+            }
+          } catch (e) {
+            // If async iteration fails on Windows, try reading as text
+            console.log(`[LMClient] Async iteration failed, trying text fallback:`, e)
+            try {
+              const text = await resp.text()
+              await handleText(text)
+            } catch (textError) {
+              console.log(`[LMClient] Text fallback also failed:`, textError)
+              throw textError
+            }
           }
         }
         return { success: true, content: answer.trim(), model: modelName, links: quickHits?.slice(0, 3), thinking: showThinking ? thinking : '' }

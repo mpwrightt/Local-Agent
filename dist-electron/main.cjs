@@ -4112,7 +4112,7 @@ Reasoning Effort: ${rl}`;
       const systemIdx = guardedMessages.findIndex((m) => m.role === "system");
       if (systemIdx >= 0) guardedMessages[systemIdx] = { role: "system", content: guardedMessages[systemIdx].content + `
 ${reasoningHint}` };
-      const doStream = input.stream !== false && process.env.LM_DISABLE_STREAM !== "1";
+      const doStream = input.stream !== false && process.env.LM_DISABLE_STREAM !== "1" && process.env.LM_FORCE_NON_STREAM !== "1";
       if (typeof modelName === "string" && modelName.startsWith("ollama:")) {
         try {
           const base = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
@@ -4314,8 +4314,19 @@ ${reasoningHint}` };
             await handleText(decoder.decode(value, { stream: true }));
           }
         } else if (body) {
-          for await (const chunk of body) {
-            await handleText(decoder.decode(chunk, { stream: true }));
+          try {
+            for await (const chunk of body) {
+              await handleText(decoder.decode(chunk, { stream: true }));
+            }
+          } catch (e) {
+            console.log(`[LMClient] Async iteration failed, trying text fallback:`, e);
+            try {
+              const text = await resp.text();
+              await handleText(text);
+            } catch (textError) {
+              console.log(`[LMClient] Text fallback also failed:`, textError);
+              throw textError;
+            }
           }
         }
         return { success: true, content: answer.trim(), model: modelName, links: quickHits == null ? void 0 : quickHits.slice(0, 3), thinking: showThinking ? thinking : "" };
