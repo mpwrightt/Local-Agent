@@ -132,25 +132,30 @@ export async function spawnFileOpsAgent(ctx: Ctx) {
           }
         } else if (process.platform === 'win32') {
           console.log(`[FileOps] Windows search - name: "${name}", listType: "${listType}", scope: "${scope}"`)
-          // Handle folder listing specifically
-          if (listType === 'folders' && name === '*') {
-            // List folders in the specified scope
+          // Handle folder/file listing with direct filesystem operations (more reliable than PowerShell)
+          if ((listType === 'folders' || listType === 'files') && name === '*') {
             const targetScope = scope === 'any' ? 'desktop' : scope
             const targetPath = scopes[targetScope] || scopes.desktop
-            console.log(`[FileOps] Listing folders in: ${targetPath}`)
-            const ps = `Get-ChildItem -LiteralPath \"${targetPath}\" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`
-            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`
-            console.log(`[FileOps] Windows folder listing command: ${fullCmd}`)
-            out = execSync(fullCmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-          } else if (listType === 'files' && name === '*') {
-            // List files in the specified scope  
-            const targetScope = scope === 'any' ? 'desktop' : scope
-            const targetPath = scopes[targetScope] || scopes.desktop
-            console.log(`[FileOps] Listing files in: ${targetPath}`)
-            const ps = `Get-ChildItem -LiteralPath \"${targetPath}\" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`
-            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`
-            console.log(`[FileOps] Windows file listing command: ${fullCmd}`)
-            out = execSync(fullCmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+            console.log(`[FileOps] Listing ${listType} in: ${targetPath}`)
+            
+            try {
+              const entries = fs.readdirSync(targetPath, { withFileTypes: true })
+              const filtered = entries.filter(entry => {
+                if (listType === 'folders') return entry.isDirectory()
+                if (listType === 'files') return entry.isFile()
+                return false
+              })
+              const paths = filtered.map(entry => path.join(targetPath, entry.name))
+              out = paths.join('\n')
+              console.log(`[FileOps] Found ${paths.length} ${listType} using filesystem`)
+            } catch (fsError) {
+              console.log(`[FileOps] Filesystem listing failed, trying PowerShell fallback:`, fsError)
+              // Fallback to PowerShell if filesystem fails
+              const ps = `Get-ChildItem -LiteralPath '${targetPath}' ${listType === 'folders' ? '-Directory' : '-File'} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`
+              const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`
+              console.log(`[FileOps] Windows PowerShell fallback: ${fullCmd}`)
+              out = execSync(fullCmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+            }
           } else if (!listType) {
             // PowerShell: search common libraries recursively (limited depth for speed)
             const roots = [

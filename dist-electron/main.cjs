@@ -1932,22 +1932,27 @@ async function spawnFileOpsAgent(ctx) {
           }
         } else if (process.platform === "win32") {
           console.log(`[FileOps] Windows search - name: "${name}", listType: "${listType}", scope: "${scope}"`);
-          if (listType === "folders" && name === "*") {
+          if ((listType === "folders" || listType === "files") && name === "*") {
             const targetScope = scope === "any" ? "desktop" : scope;
             const targetPath = scopes[targetScope] || scopes.desktop;
-            console.log(`[FileOps] Listing folders in: ${targetPath}`);
-            const ps = `Get-ChildItem -LiteralPath "${targetPath}" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`;
-            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`;
-            console.log(`[FileOps] Windows folder listing command: ${fullCmd}`);
-            out = execSync(fullCmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-          } else if (listType === "files" && name === "*") {
-            const targetScope = scope === "any" ? "desktop" : scope;
-            const targetPath = scopes[targetScope] || scopes.desktop;
-            console.log(`[FileOps] Listing files in: ${targetPath}`);
-            const ps = `Get-ChildItem -LiteralPath "${targetPath}" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`;
-            const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`;
-            console.log(`[FileOps] Windows file listing command: ${fullCmd}`);
-            out = execSync(fullCmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+            console.log(`[FileOps] Listing ${listType} in: ${targetPath}`);
+            try {
+              const entries = import_node_fs4.default.readdirSync(targetPath, { withFileTypes: true });
+              const filtered = entries.filter((entry) => {
+                if (listType === "folders") return entry.isDirectory();
+                if (listType === "files") return entry.isFile();
+                return false;
+              });
+              const paths = filtered.map((entry) => import_node_path4.default.join(targetPath, entry.name));
+              out = paths.join("\n");
+              console.log(`[FileOps] Found ${paths.length} ${listType} using filesystem`);
+            } catch (fsError) {
+              console.log(`[FileOps] Filesystem listing failed, trying PowerShell fallback:`, fsError);
+              const ps = `Get-ChildItem -LiteralPath '${targetPath}' ${listType === "folders" ? "-Directory" : "-File"} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName`;
+              const fullCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${ps}"`;
+              console.log(`[FileOps] Windows PowerShell fallback: ${fullCmd}`);
+              out = execSync(fullCmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+            }
           } else if (!listType) {
             const roots = [
               scopes.desktop,
